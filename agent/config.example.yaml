@@ -1,0 +1,19 @@
+# Copy to config.yaml and fill in real values. config.yaml is gitignored
+# since it will hold a real API key.
+
+endpoint: "https://pulse-ingest.example.com/metrics"
+api_key: "changeme"
+
+# Seconds between collection cycles.
+interval_seconds: 10
+
+# Defaults to the machine's hostname if omitted.
+hostname: null
+
+# Arbitrary tags attached to every metric this agent reports.
+tags:
+  environment: dev
+
+# How many batches worth of metrics to retain in memory while retrying a
+# failed send, before the oldest metrics start getting dropped.
+buffer_max_batches: 100

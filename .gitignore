@@ -1,0 +1,10 @@
+__pycache__/
+*.pyc
+.venv/
+.pytest_cache/
+*.egg-info/
+build/
+dist/
+
+# Real per-host config with a live API key. Commit config.example.yaml instead.
+config.yaml
