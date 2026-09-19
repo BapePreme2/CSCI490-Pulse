@@ -16,3 +16,10 @@ the full scope and schedule.
 - `dashboard/` — fleet dashboard (planned, Week 5).
 
 Each subdirectory is its own project with its own dependencies.
+
+## AI assistance
+
+This project was developed with assistance from Claude Sonnet 5 (Anthropic),
+which was used to plan the work, write code, tests, and documentation, and
+debug. The author is responsible for the accuracy, quality, and originality
+of the submitted work.
