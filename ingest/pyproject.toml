@@ -5,6 +5,7 @@ description = "Ingestion API and storage layer for the Pulse platform"
 requires-python = ">=3.10"
 dependencies = [
     "pydantic>=2.5",
+    "psycopg[binary]>=3.1",
 ]
 
 [project.optional-dependencies]
@@ -16,3 +17,6 @@ build-backend = "setuptools.build_meta"
 
 [tool.setuptools.packages.find]
 include = ["pulse_ingest*"]
+
+[tool.pytest.ini_options]
+markers = ["integration: needs a running Postgres (scripts/dev-db.sh up)"]
