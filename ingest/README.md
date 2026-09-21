@@ -17,6 +17,17 @@ pytest                               # integration tests need the DB running
 The database URL defaults to `postgresql://pulse:pulse@localhost:5432/pulse`
 (dev-only credentials); override it with `PULSE_DATABASE_URL`.
 
+## Run the API
+
+```bash
+cd ingest && source .venv/bin/activate
+uvicorn pulse_ingest.app:app --reload      # http://127.0.0.1:8000
+curl http://127.0.0.1:8000/health          # {"status":"ok","version":"0.1.0"}
+```
+
+FastAPI's interactive docs are served at `/docs`. `GET /health` is a liveness
+check only; it does not touch the database.
+
 ## Payload schema (`POST /metrics`)
 
 Defined in `pulse_ingest/schemas.py` (`MetricBatch`, `MetricIn`). One request
@@ -70,5 +81,6 @@ half-applied. To add one, create the next numbered file, e.g.
 | Task | File(s) |
 | --- | --- |
 | INGEST-01 payload schema | `pulse_ingest/schemas.py`, `tests/test_schemas.py` |
+| INGEST-02 API scaffold + health check | `pulse_ingest/app.py`, `tests/test_health.py` |
 | STORE-01 Postgres schema | `migrations/001_initial_schema.sql` |
 | STORE-02 migrations | `pulse_ingest/migrate.py`, `tests/test_migrate.py`, `scripts/dev-db.sh` |
