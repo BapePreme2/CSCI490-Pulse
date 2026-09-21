@@ -2,25 +2,45 @@ from __future__ import annotations
 
 import logging
 from collections.abc import Iterable
+from contextlib import asynccontextmanager
 
-from fastapi import FastAPI, Request, status
+import psycopg
+from fastapi import FastAPI, HTTPException, Request, status
 from fastapi.responses import JSONResponse
+from psycopg_pool import PoolTimeout
 
 from pulse_ingest import __version__
 from pulse_ingest.auth import extract_bearer_token, is_valid_key, load_api_keys
+from pulse_ingest.migrate import database_url
 from pulse_ingest.schemas import MetricBatch
+from pulse_ingest.store import MetricStore, PostgresMetricStore
 
 logger = logging.getLogger(__name__)
 
 AGENT_PATHS = {"/metrics"}
 
 
-def create_app(api_keys: Iterable[str] | None = None) -> FastAPI:
+def create_app(
+    api_keys: Iterable[str] | None = None, store: MetricStore | None = None
+) -> FastAPI:
     keys = frozenset(api_keys) if api_keys is not None else load_api_keys()
     if not keys:
         logger.warning("No API keys configured (PULSE_API_KEYS); all agent requests will be rejected")
 
-    app = FastAPI(title="Pulse Ingest", version=__version__)
+    owned_store = PostgresMetricStore(database_url()) if store is None else None
+    store = store or owned_store
+
+    @asynccontextmanager
+    async def lifespan(_app: FastAPI):
+        if owned_store:
+            owned_store.open()
+        try:
+            yield
+        finally:
+            if owned_store:
+                owned_store.close()
+
+    app = FastAPI(title="Pulse Ingest", version=__version__, lifespan=lifespan)
 
     @app.middleware("http")
     async def require_api_key(request: Request, call_next):
@@ -40,7 +60,14 @@ def create_app(api_keys: Iterable[str] | None = None) -> FastAPI:
 
     @app.post("/metrics", status_code=status.HTTP_202_ACCEPTED)
     def ingest_metrics(batch: MetricBatch) -> dict[str, int]:
-        return {"accepted": len(batch.metrics)}
+        try:
+            result = store.write_batch(batch)
+        except (psycopg.OperationalError, PoolTimeout):
+            logger.exception("Database unavailable while storing batch from %s", batch.host)
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail="Database unavailable"
+            )
+        return {"accepted": len(batch.metrics), "stored": result.stored}
 
     return app
 

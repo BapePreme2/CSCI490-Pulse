@@ -1,15 +1,22 @@
+import psycopg
 import pytest
 from fastapi.testclient import TestClient
+from psycopg_pool import PoolTimeout
 
 from pulse_ingest.app import create_app
+from tests.fakes import FakeStore
+
+
+def build_client(store):
+    return TestClient(
+        create_app(api_keys={"test-key"}, store=store),
+        headers={"Authorization": "Bearer test-key"},
+    )
 
 
 @pytest.fixture
 def client():
-    return TestClient(
-        create_app(api_keys={"test-key"}),
-        headers={"Authorization": "Bearer test-key"},
-    )
+    return build_client(FakeStore())
 
 
 def metric(**overrides):
@@ -30,7 +37,7 @@ def test_valid_batch_is_accepted(client):
     response = client.post("/metrics", json=body)
 
     assert response.status_code == 202
-    assert response.json() == {"accepted": 2}
+    assert response.json() == {"accepted": 2, "stored": 2}
 
 
 def test_missing_host_is_rejected_with_field_location(client):
@@ -75,3 +82,33 @@ def test_malformed_json_is_rejected(client):
 
 def test_get_is_not_allowed(client):
     assert client.get("/metrics").status_code == 405
+
+
+def test_valid_batch_is_handed_to_the_store():
+    store = FakeStore()
+    client = build_client(store)
+
+    client.post("/metrics", json={"host": "web-1", "metrics": [metric()]})
+
+    assert len(store.batches) == 1
+    assert store.batches[0].host == "web-1"
+    assert store.batches[0].metrics[0].name == "cpu.usage"
+
+
+def test_invalid_batch_never_reaches_the_store():
+    store = FakeStore()
+    client = build_client(store)
+
+    client.post("/metrics", json={"host": "web-1", "metrics": []})
+
+    assert store.batches == []
+
+
+@pytest.mark.parametrize("error", [psycopg.OperationalError("db down"), PoolTimeout("no connections")])
+def test_database_outage_is_503_so_agents_retry(error):
+    client = build_client(FakeStore(error=error))
+
+    response = client.post("/metrics", json={"host": "web-1", "metrics": [metric()]})
+
+    assert response.status_code == 503
+    assert response.json() == {"detail": "Database unavailable"}

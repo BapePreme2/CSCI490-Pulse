@@ -3,11 +3,16 @@ from fastapi.testclient import TestClient
 
 from pulse_ingest.app import create_app
 from pulse_ingest.auth import extract_bearer_token, is_valid_key, load_api_keys
+from tests.fakes import FakeStore
 
 BODY = {
     "host": "web-1",
     "metrics": [{"name": "cpu.usage", "value": 1.0, "unit": "percent", "timestamp": 1789419042.5}],
 }
+
+
+def make_client(api_keys):
+    return TestClient(create_app(api_keys=api_keys, store=FakeStore()))
 
 
 def post(client, headers=None, **kwargs):
@@ -59,19 +64,19 @@ def test_load_api_keys_empty_when_unset(monkeypatch):
 
 
 def test_valid_key_is_accepted():
-    client = TestClient(create_app(api_keys={"good"}))
+    client = make_client({"good"})
 
     assert post(client, {"Authorization": "Bearer good"}).status_code == 202
 
 
 def test_any_configured_key_works():
-    client = TestClient(create_app(api_keys={"one", "two"}))
+    client = make_client({"one", "two"})
 
     assert post(client, {"Authorization": "Bearer two"}).status_code == 202
 
 
 def test_missing_key_is_401_with_challenge():
-    client = TestClient(create_app(api_keys={"good"}))
+    client = make_client({"good"})
 
     response = post(client)
 
@@ -81,20 +86,20 @@ def test_missing_key_is_401_with_challenge():
 
 @pytest.mark.parametrize("header", ["Bearer wrong", "Basic good", "good", "Bearer "])
 def test_wrong_or_malformed_credentials_are_401(header):
-    client = TestClient(create_app(api_keys={"good"}))
+    client = make_client({"good"})
 
     assert post(client, {"Authorization": header}).status_code == 401
 
 
 def test_no_configured_keys_rejects_everything():
-    client = TestClient(create_app(api_keys=set()))
+    client = make_client(set())
 
     assert post(client, {"Authorization": "Bearer anything"}).status_code == 401
     assert post(client).status_code == 401
 
 
 def test_auth_runs_before_body_validation():
-    client = TestClient(create_app(api_keys={"good"}))
+    client = make_client({"good"})
 
     bad_json = client.post(
         "/metrics", content="{not json", headers={"Content-Type": "application/json"}
@@ -106,7 +111,7 @@ def test_auth_runs_before_body_validation():
 
 
 def test_trailing_slash_does_not_bypass_auth():
-    client = TestClient(create_app(api_keys={"good"}))
+    client = make_client({"good"})
 
     response = client.post("/metrics/", json=BODY, follow_redirects=False)
 
@@ -114,14 +119,14 @@ def test_trailing_slash_does_not_bypass_auth():
 
 
 def test_health_stays_open_without_a_key():
-    client = TestClient(create_app(api_keys={"good"}))
+    client = make_client({"good"})
 
     assert client.get("/health").status_code == 200
 
 
 def test_default_app_reads_keys_from_environment(monkeypatch):
     monkeypatch.setenv("PULSE_API_KEYS", "from-env")
-    client = TestClient(create_app())
+    client = TestClient(create_app(store=FakeStore()))
 
     assert post(client, {"Authorization": "Bearer from-env"}).status_code == 202
     assert post(client, {"Authorization": "Bearer other"}).status_code == 401

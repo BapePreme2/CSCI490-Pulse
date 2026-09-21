@@ -14,6 +14,10 @@ python -m pulse_ingest.migrate       # applies migrations/*.sql
 pytest                               # integration tests need the DB running
 ```
 
+If the Docker container has stopped (e.g. after a reboot), `scripts/dev-db.sh
+up` starts it again; the integration tests skip themselves when Postgres is
+unreachable.
+
 The database URL defaults to `postgresql://pulse:pulse@localhost:5432/pulse`
 (dev-only credentials); override it with `PULSE_DATABASE_URL`.
 
@@ -77,13 +81,31 @@ string key/value, and unknown fields are rejected.
 
 Responses:
 
-- `202 {"accepted": N}` when the whole batch is valid.
+- `202 {"accepted": N, "stored": M}` when the whole batch is valid and
+  written. `accepted` is the number of metrics received; `stored` is how many
+  were new, so a resent batch reports `stored: 0`.
 - `422` with FastAPI's field-level `detail` (e.g. `["body", "metrics", 1,
   "value"]` points at the bad metric) when any part of it is invalid. A batch
   is all-or-nothing: one bad metric rejects the request.
+- `503` when the database is unreachable. Agents should treat this as
+  retryable (unlike `422`, which will never succeed on retry).
 
-Until STORE-03 lands the endpoint validates and counts the batch but does
-not persist it.
+## Write path
+
+`pulse_ingest/store.py` (`PostgresMetricStore`) writes each batch in a single
+transaction, so it is stored completely or not at all:
+
+1. Upsert the host (`hosts.last_seen_at` is refreshed on every write, which
+   later powers offline-host detection).
+2. Upsert the batch's distinct `(name, unit)` pairs into `metrics`, in sorted
+   order so concurrent batches can't deadlock on shared rows.
+3. Insert all samples with `ON CONFLICT DO NOTHING`, using the unique sample
+   key from the schema. This makes agent retries idempotent.
+
+The agent already tags every metric with `host`; since `host_id` identifies
+it, that tag is dropped before storing. Connections come from a pool
+(`psycopg_pool`) that the app opens on startup. Run the migrations before
+starting the API.
 
 ## Database schema
 
@@ -117,5 +139,6 @@ half-applied. To add one, create the next numbered file, e.g.
 | INGEST-02 API scaffold + health check | `pulse_ingest/app.py`, `tests/test_health.py` |
 | INGEST-03 `POST /metrics` + validation | `pulse_ingest/app.py`, `tests/test_ingest.py` |
 | INGEST-04 API-key auth middleware | `pulse_ingest/auth.py`, `pulse_ingest/app.py`, `tests/test_auth.py` |
+| STORE-03 batched write path | `pulse_ingest/store.py`, `pulse_ingest/app.py`, `tests/test_store.py` |
 | STORE-01 Postgres schema | `migrations/001_initial_schema.sql` |
 | STORE-02 migrations | `pulse_ingest/migrate.py`, `tests/test_migrate.py`, `scripts/dev-db.sh` |
