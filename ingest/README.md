@@ -21,12 +21,35 @@ The database URL defaults to `postgresql://pulse:pulse@localhost:5432/pulse`
 
 ```bash
 cd ingest && source .venv/bin/activate
+export PULSE_API_KEYS="$(python -c 'import secrets; print(secrets.token_urlsafe(32))')"
 uvicorn pulse_ingest.app:app --reload      # http://127.0.0.1:8000
 curl http://127.0.0.1:8000/health          # {"status":"ok","version":"0.1.0"}
 ```
 
 FastAPI's interactive docs are served at `/docs`. `GET /health` is a liveness
 check only; it does not touch the database.
+
+## Authentication
+
+Agent requests (`POST /metrics`) must send `Authorization: Bearer <key>`,
+where `<key>` is the `api_key` from the agent's config. Valid keys come from
+the `PULSE_API_KEYS` environment variable (comma-separated, so keys can be
+rotated by listing the old and new one together).
+
+```bash
+curl -X POST http://127.0.0.1:8000/metrics \
+  -H "Authorization: Bearer $PULSE_API_KEYS" \
+  -H "Content-Type: application/json" \
+  -d '{"host":"web-1","metrics":[{"name":"cpu.usage","value":42.5,"unit":"percent","timestamp":1789419042.5}]}'
+```
+
+- Missing, malformed, or wrong keys get `401` with `WWW-Authenticate: Bearer`.
+- The check runs as middleware before the body is read, so unauthenticated
+  requests never get their payload parsed.
+- Keys are compared in constant time.
+- It fails closed: with no keys configured, every agent request is rejected
+  (a warning is logged at startup).
+- `/health` needs no key so load balancers and uptime checks can reach it.
 
 ## Payload schema (`POST /metrics`)
 
@@ -93,5 +116,6 @@ half-applied. To add one, create the next numbered file, e.g.
 | INGEST-01 payload schema | `pulse_ingest/schemas.py`, `tests/test_schemas.py` |
 | INGEST-02 API scaffold + health check | `pulse_ingest/app.py`, `tests/test_health.py` |
 | INGEST-03 `POST /metrics` + validation | `pulse_ingest/app.py`, `tests/test_ingest.py` |
+| INGEST-04 API-key auth middleware | `pulse_ingest/auth.py`, `pulse_ingest/app.py`, `tests/test_auth.py` |
 | STORE-01 Postgres schema | `migrations/001_initial_schema.sql` |
 | STORE-02 migrations | `pulse_ingest/migrate.py`, `tests/test_migrate.py`, `scripts/dev-db.sh` |

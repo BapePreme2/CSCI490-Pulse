@@ -6,7 +6,10 @@ from pulse_ingest.app import create_app
 
 @pytest.fixture
 def client():
-    return TestClient(create_app())
+    return TestClient(
+        create_app(api_keys={"test-key"}),
+        headers={"Authorization": "Bearer test-key"},
+    )
 
 
 def metric(**overrides):
