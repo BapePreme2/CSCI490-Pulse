@@ -11,15 +11,13 @@ from pulse_agent.collectors.memory import MemoryCollector
 from pulse_agent.collectors.network import NetworkCollector
 from pulse_agent.config import AgentConfig
 from pulse_agent.metrics import Metric
+from pulse_agent.sender import HttpSender
 
 logger = logging.getLogger(__name__)
 
 
 class LoggingSender:
-    """Stand-in Sender used until the ingestion API HTTP client (AGENT-11,
-    week 4) exists. Logs the batch instead of transmitting it, so the agent
-    is runnable and demoable on its own this week.
-    """
+    """Sender for --dry-run: logs each batch instead of transmitting it."""
 
     def send(self, metrics: list[Metric]) -> bool:
         logger.info("Would send %d metric(s)", len(metrics))
@@ -31,7 +29,12 @@ class LoggingSender:
 class PulseAgent:
     def __init__(self, config: AgentConfig, sender: Sender | None = None) -> None:
         self.config = config
-        self.sender = sender or LoggingSender()
+        self.sender = sender or HttpSender(
+            config.endpoint,
+            config.api_key,
+            config.hostname,
+            timeout=config.request_timeout_seconds,
+        )
         self.buffer = MetricBuffer(max_batches=config.buffer_max_batches)
         self.collectors = [
             CPUCollector(),

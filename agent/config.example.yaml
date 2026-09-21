@@ -1,7 +1,10 @@
 # Copy to config.yaml and fill in real values. config.yaml is gitignored
 # since it will hold a real API key.
 
+# Full URL of the ingestion API's POST /metrics endpoint.
 endpoint: "https://pulse-ingest.example.com/metrics"
+
+# Must match one of the keys in the API's PULSE_API_KEYS.
 api_key: "changeme"
 
 # Seconds between collection cycles.
@@ -17,3 +20,6 @@ tags:
 # How many batches worth of metrics to retain in memory while retrying a
 # failed send, before the oldest metrics start getting dropped.
 buffer_max_batches: 100
+
+# Seconds to wait for the ingestion API before treating a send as failed.
+request_timeout_seconds: 10

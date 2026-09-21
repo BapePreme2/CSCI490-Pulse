@@ -43,6 +43,25 @@ def test_non_mapping_config_raises(tmp_path):
         load_config(config_file)
 
 
+@pytest.mark.parametrize("endpoint", ["ingest.example.com/metrics", "ftp://example.com", "localhost:8000"])
+def test_endpoint_must_be_an_http_url(tmp_path, endpoint):
+    config_file = tmp_path / "config.yaml"
+    config_file.write_text(f"endpoint: {endpoint}\napi_key: secret\n")
+
+    with pytest.raises(ConfigError, match="http"):
+        load_config(config_file)
+
+
+def test_request_timeout_is_configurable_and_must_be_positive(tmp_path):
+    config_file = tmp_path / "config.yaml"
+    config_file.write_text("endpoint: https://e.com\napi_key: k\nrequest_timeout_seconds: 3\n")
+    assert load_config(config_file).request_timeout_seconds == 3.0
+
+    config_file.write_text("endpoint: https://e.com\napi_key: k\nrequest_timeout_seconds: 0\n")
+    with pytest.raises(ConfigError):
+        load_config(config_file)
+
+
 def test_defaults_are_applied(tmp_path):
     config_file = tmp_path / "config.yaml"
     config_file.write_text("endpoint: https://example.com\napi_key: secret\n")

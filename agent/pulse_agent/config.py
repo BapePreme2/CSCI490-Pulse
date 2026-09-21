@@ -19,6 +19,7 @@ class AgentConfig:
     hostname: str = field(default_factory=socket.gethostname)
     tags: dict[str, str] = field(default_factory=dict)
     buffer_max_batches: int = 100
+    request_timeout_seconds: float = 10.0
 
     @classmethod
     def from_dict(cls, data: dict) -> "AgentConfig":
@@ -26,13 +27,22 @@ class AgentConfig:
         if missing:
             raise ConfigError(f"Missing required config field(s): {', '.join(missing)}")
 
+        endpoint = str(data["endpoint"])
+        if not endpoint.startswith(("http://", "https://")):
+            raise ConfigError(f"endpoint must start with http:// or https://, got: {endpoint}")
+
+        timeout = float(data.get("request_timeout_seconds", 10.0))
+        if timeout <= 0:
+            raise ConfigError("request_timeout_seconds must be greater than 0")
+
         return cls(
-            endpoint=data["endpoint"],
+            endpoint=endpoint,
             api_key=data["api_key"],
             interval_seconds=float(data.get("interval_seconds", 10.0)),
             hostname=data.get("hostname") or socket.gethostname(),
             tags=data.get("tags") or {},
             buffer_max_batches=int(data.get("buffer_max_batches", 100)),
+            request_timeout_seconds=timeout,
         )
 
 
