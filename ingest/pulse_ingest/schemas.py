@@ -6,6 +6,13 @@ MAX_TAGS = 20
 MAX_TAG_LEN = 200
 
 
+def _reject_nul(value: str) -> str:
+    # Postgres text columns cannot store NUL characters.
+    if "\x00" in value:
+        raise ValueError("NUL characters are not allowed")
+    return value
+
+
 class MetricIn(BaseModel):
     """One sample, mirroring the agent's `Metric.to_dict()` output."""
 
@@ -17,6 +24,11 @@ class MetricIn(BaseModel):
     tags: dict[str, str] = Field(default_factory=dict)
     timestamp: float = Field(gt=0, description="Unix epoch seconds")
 
+    @field_validator("name", "unit")
+    @classmethod
+    def _check_text(cls, value: str) -> str:
+        return _reject_nul(value)
+
     @field_validator("tags")
     @classmethod
     def _check_tags(cls, tags: dict[str, str]) -> dict[str, str]:
@@ -25,6 +37,8 @@ class MetricIn(BaseModel):
         for key, val in tags.items():
             if not key or len(key) > MAX_TAG_LEN or len(val) > MAX_TAG_LEN:
                 raise ValueError(f"tag keys/values must be 1-{MAX_TAG_LEN} chars")
+            _reject_nul(key)
+            _reject_nul(val)
         return tags
 
 
@@ -35,3 +49,8 @@ class MetricBatch(BaseModel):
 
     host: str = Field(min_length=1, max_length=255)
     metrics: list[MetricIn] = Field(min_length=1, max_length=5000)
+
+    @field_validator("host")
+    @classmethod
+    def _check_host(cls, value: str) -> str:
+        return _reject_nul(value)

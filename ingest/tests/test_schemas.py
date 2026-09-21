@@ -59,11 +59,20 @@ def test_rejects_missing_host(bad_host):
         {"tags": {"core": 0}},
         {"tags": {"": "x"}},
         {"tags": {f"k{i}": "v" for i in range(21)}},
+        {"name": "cpu\x00usage"},
+        {"unit": "per\x00cent"},
+        {"tags": {"core\x00": "0"}},
+        {"tags": {"core": "0\x00"}},
     ],
 )
 def test_rejects_invalid_metric(override):
     with pytest.raises(ValidationError):
         MetricIn(**valid_metric(**override))
+
+
+def test_rejects_nul_in_host():
+    with pytest.raises(ValidationError):
+        MetricBatch(host="web\x00-1", metrics=[valid_metric()])
 
 
 def test_rejects_unknown_fields():
