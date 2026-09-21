@@ -52,6 +52,16 @@ Rules: 1-5000 metrics per batch (matches the agent's default buffer cap),
 `value` must be finite, `timestamp` is Unix epoch seconds, at most 20 tags of
 string key/value, and unknown fields are rejected.
 
+Responses:
+
+- `202 {"accepted": N}` when the whole batch is valid.
+- `422` with FastAPI's field-level `detail` (e.g. `["body", "metrics", 1,
+  "value"]` points at the bad metric) when any part of it is invalid. A batch
+  is all-or-nothing: one bad metric rejects the request.
+
+Until STORE-03 lands the endpoint validates and counts the batch but does
+not persist it.
+
 ## Database schema
 
 `migrations/001_initial_schema.sql`:
@@ -82,5 +92,6 @@ half-applied. To add one, create the next numbered file, e.g.
 | --- | --- |
 | INGEST-01 payload schema | `pulse_ingest/schemas.py`, `tests/test_schemas.py` |
 | INGEST-02 API scaffold + health check | `pulse_ingest/app.py`, `tests/test_health.py` |
+| INGEST-03 `POST /metrics` + validation | `pulse_ingest/app.py`, `tests/test_ingest.py` |
 | STORE-01 Postgres schema | `migrations/001_initial_schema.sql` |
 | STORE-02 migrations | `pulse_ingest/migrate.py`, `tests/test_migrate.py`, `scripts/dev-db.sh` |
