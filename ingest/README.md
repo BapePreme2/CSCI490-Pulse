@@ -18,6 +18,17 @@ If the Docker container has stopped (e.g. after a reboot), `scripts/dev-db.sh
 up` starts it again; the integration tests skip themselves when Postgres is
 unreachable.
 
+`tests/test_round_trip.py` is the end-to-end test: it launches the real API
+and the real agent CLI as separate processes against a throwaway database. It
+needs the agent installed too (`cd ../agent && python3 -m venv .venv && pip
+install -e .`) and skips itself if `agent/.venv` is missing. It checks that:
+
+- metrics from a running agent arrive in Postgres with sensible values,
+  recent timestamps, and the configured tags;
+- metrics the agent collects while the API is down are delivered after the
+  API starts (the agent's retry buffer, across real processes);
+- a wrong API key stores nothing while the agent keeps retrying.
+
 The database URL defaults to `postgresql://pulse:pulse@localhost:5432/pulse`
 (dev-only credentials); override it with `PULSE_DATABASE_URL`.
 
@@ -140,5 +151,6 @@ half-applied. To add one, create the next numbered file, e.g.
 | INGEST-03 `POST /metrics` + validation | `pulse_ingest/app.py`, `tests/test_ingest.py` |
 | INGEST-04 API-key auth middleware | `pulse_ingest/auth.py`, `pulse_ingest/app.py`, `tests/test_auth.py` |
 | STORE-03 batched write path | `pulse_ingest/store.py`, `pulse_ingest/app.py`, `tests/test_store.py` |
+| INGEST-05 agent → API → Postgres round trip | `tests/test_round_trip.py` |
 | STORE-01 Postgres schema | `migrations/001_initial_schema.sql` |
 | STORE-02 migrations | `pulse_ingest/migrate.py`, `tests/test_migrate.py`, `scripts/dev-db.sh` |
