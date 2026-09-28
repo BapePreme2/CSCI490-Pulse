@@ -80,3 +80,59 @@ body {
 .metric-tile-list li {
   margin-bottom: 2px;
 }
+
+.chart-section {
+  margin-top: 24px;
+}
+
+.chart-section h2 {
+  margin: 0 0 8px;
+  font-size: 1rem;
+}
+
+.line-chart-wrapper {
+  max-width: 480px;
+}
+
+.line-chart {
+  width: 100%;
+  height: auto;
+}
+
+.line-chart-axis {
+  stroke: currentColor;
+  stroke-opacity: 0.35;
+}
+
+.line-chart-label {
+  font-size: 10px;
+  fill: currentColor;
+  opacity: 0.7;
+}
+
+.line-chart-empty {
+  opacity: 0.6;
+}
+
+.line-chart-legend {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px;
+  margin: 8px 0 0;
+  padding: 0;
+  list-style: none;
+  font-size: 0.85rem;
+}
+
+.line-chart-legend li {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.line-chart-legend-swatch {
+  display: inline-block;
+  width: 10px;
+  height: 10px;
+  border-radius: 2px;
+}

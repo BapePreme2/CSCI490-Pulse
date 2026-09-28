@@ -49,6 +49,13 @@ npm run build
 - `src/components/*Tile.tsx` -- one tile per metric domain (CPU, memory,
   disk, network), each reading straight from the flat metrics array via the
   helpers above and rendering its own empty state.
+- `src/components/LineChart.tsx` -- a reusable time-series line chart (plain
+  SVG, no charting library). Takes one or more `{label, points}` series and
+  draws a colored line per series, with a legend once there's more than one.
+  `HostPage` uses it for a "CPU usage (last hour)" chart, one line per core,
+  via `GET /hosts/{host}/metrics/cpu.usage` and
+  `src/metrics/series.ts#toChartSeries` (which turns each series' tags into
+  its line's label, e.g. `{core: "0"}` -> `"core 0"`).
 
 The dashboard calls the ingest API directly from the browser (a different
 origin in dev), which needs the API's CORS support -- see
@@ -74,3 +81,4 @@ matches the URL you're loading the dashboard from.
 | --- | --- |
 | DASH-01 frontend scaffold | this directory: `package.json`, `vite.config.ts`, `src/main.tsx`, `src/App.tsx`, `src/layout/AppShell.tsx`, `src/App.test.tsx` |
 | DASH-04 single-host overview page | `src/routes/HostPage.tsx`, `src/api/client.ts`, `src/metrics/`, `src/components/*Tile.tsx` |
+| DASH-05 reusable line chart component | `src/components/LineChart.tsx`, `src/metrics/series.ts`, wired into `src/routes/HostPage.tsx` |

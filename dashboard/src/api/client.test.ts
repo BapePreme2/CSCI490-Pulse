@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { ApiError, HostNotFoundError, fetchLatestMetrics } from "./client";
+import { ApiError, HostNotFoundError, fetchLatestMetrics, fetchMetricHistory } from "./client";
 
 afterEach(() => {
   vi.unstubAllGlobals();
@@ -50,5 +50,54 @@ describe("fetchLatestMetrics", () => {
     vi.stubGlobal("fetch", vi.fn().mockRejectedValue(new TypeError("network down")));
 
     await expect(fetchLatestMetrics("web-1")).rejects.toThrow(ApiError);
+  });
+});
+
+describe("fetchMetricHistory", () => {
+  it("returns the response on success", async () => {
+    mockFetch({
+      json: async () => ({
+        host: "web-1",
+        name: "cpu.usage",
+        start: 0,
+        end: 100,
+        series: [{ unit: "percent", tags: {}, points: [{ timestamp: 50, value: 12.5 }] }],
+      }),
+    });
+
+    const history = await fetchMetricHistory("web-1", "cpu.usage");
+
+    expect(history.series).toHaveLength(1);
+    expect(history.series[0].points[0].value).toBe(12.5);
+  });
+
+  it("omits start/end from the query string when not given", async () => {
+    const fetchMock = mockFetch({ json: async () => ({ host: "web-1", name: "cpu.usage", start: 0, end: 0, series: [] }) });
+
+    await fetchMetricHistory("web-1", "cpu.usage");
+
+    expect(fetchMock).toHaveBeenCalledWith("http://localhost:8000/hosts/web-1/metrics/cpu.usage");
+  });
+
+  it("includes start/end and escapes the metric name when given", async () => {
+    const fetchMock = mockFetch({ json: async () => ({ host: "web-1", name: "cpu.usage", start: 1, end: 2, series: [] }) });
+
+    await fetchMetricHistory("web-1", "cpu/usage", 1, 2);
+
+    expect(fetchMock).toHaveBeenCalledWith(
+      "http://localhost:8000/hosts/web-1/metrics/cpu%2Fusage?start=1&end=2",
+    );
+  });
+
+  it("throws HostNotFoundError on a 404", async () => {
+    mockFetch({ ok: false, status: 404 });
+
+    await expect(fetchMetricHistory("nope", "cpu.usage")).rejects.toThrow(HostNotFoundError);
+  });
+
+  it("throws ApiError on other non-2xx statuses", async () => {
+    mockFetch({ ok: false, status: 400 });
+
+    await expect(fetchMetricHistory("web-1", "cpu.usage")).rejects.toThrow(ApiError);
   });
 });

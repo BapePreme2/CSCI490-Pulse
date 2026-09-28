@@ -1,4 +1,4 @@
-import type { LatestMetric, LatestMetricsResponse } from "./types";
+import type { HistoryResponse, LatestMetric, LatestMetricsResponse } from "./types";
 
 const DEFAULT_API_BASE_URL = "http://localhost:8000";
 
@@ -23,10 +23,10 @@ export class ApiError extends Error {
   }
 }
 
-export async function fetchLatestMetrics(host: string): Promise<LatestMetric[]> {
+async function getJson<T>(path: string, host: string): Promise<T> {
   let response: Response;
   try {
-    response = await fetch(`${apiBaseUrl()}/hosts/${encodeURIComponent(host)}/metrics/latest`);
+    response = await fetch(`${apiBaseUrl()}${path}`);
   } catch {
     throw new ApiError("Could not reach the ingestion API.", 0);
   }
@@ -37,7 +37,30 @@ export async function fetchLatestMetrics(host: string): Promise<LatestMetric[]> 
   if (!response.ok) {
     throw new ApiError(`Request failed with status ${response.status}`, response.status);
   }
+  return (await response.json()) as T;
+}
 
-  const data = (await response.json()) as LatestMetricsResponse;
+export async function fetchLatestMetrics(host: string): Promise<LatestMetric[]> {
+  const data = await getJson<LatestMetricsResponse>(
+    `/hosts/${encodeURIComponent(host)}/metrics/latest`,
+    host,
+  );
   return data.metrics;
+}
+
+export async function fetchMetricHistory(
+  host: string,
+  name: string,
+  start?: number,
+  end?: number,
+): Promise<HistoryResponse> {
+  const params = new URLSearchParams();
+  if (start !== undefined) params.set("start", String(start));
+  if (end !== undefined) params.set("end", String(end));
+  const query = params.toString() ? `?${params.toString()}` : "";
+
+  return getJson<HistoryResponse>(
+    `/hosts/${encodeURIComponent(host)}/metrics/${encodeURIComponent(name)}${query}`,
+    host,
+  );
 }

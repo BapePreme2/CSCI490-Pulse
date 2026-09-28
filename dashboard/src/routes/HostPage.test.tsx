@@ -1,15 +1,18 @@
 import { render, screen, waitFor } from "@testing-library/react";
 import { MemoryRouter, Route, Routes } from "react-router-dom";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { ApiError, HostNotFoundError } from "../api/client";
-import type { LatestMetric } from "../api/types";
+import type { HistorySeries, LatestMetric } from "../api/types";
 import { HostPage } from "./HostPage";
 
-const { fetchLatestMetrics } = vi.hoisted(() => ({ fetchLatestMetrics: vi.fn() }));
+const { fetchLatestMetrics, fetchMetricHistory } = vi.hoisted(() => ({
+  fetchLatestMetrics: vi.fn(),
+  fetchMetricHistory: vi.fn(),
+}));
 
 vi.mock("../api/client", async () => {
   const actual = await vi.importActual<typeof import("../api/client")>("../api/client");
-  return { ...actual, fetchLatestMetrics };
+  return { ...actual, fetchLatestMetrics, fetchMetricHistory };
 });
 
 function renderHost(hostname: string) {
@@ -22,8 +25,15 @@ function renderHost(hostname: string) {
   );
 }
 
+beforeEach(() => {
+  // Most tests only care about the tiles (fetchLatestMetrics); give the
+  // chart's fetch a harmless default so it doesn't hang those tests.
+  fetchMetricHistory.mockResolvedValue({ host: "web-1", name: "cpu.usage", start: 0, end: 0, series: [] });
+});
+
 afterEach(() => {
   fetchLatestMetrics.mockReset();
+  fetchMetricHistory.mockReset();
 });
 
 describe("HostPage", () => {
@@ -77,8 +87,54 @@ describe("HostPage", () => {
 
     renderHost("web-1");
     await waitFor(() => expect(fetchLatestMetrics).toHaveBeenCalledWith("web-1"));
+    expect(fetchMetricHistory).toHaveBeenCalledWith("web-1", "cpu.usage");
 
     renderHost("web-2");
     await waitFor(() => expect(fetchLatestMetrics).toHaveBeenCalledWith("web-2"));
+    expect(fetchMetricHistory).toHaveBeenCalledWith("web-2", "cpu.usage");
+  });
+
+  describe("CPU history chart", () => {
+    it("shows a loading state before the chart data arrives", () => {
+      fetchLatestMetrics.mockReturnValue(new Promise(() => {}));
+      fetchMetricHistory.mockReturnValue(new Promise(() => {}));
+
+      renderHost("web-1");
+
+      expect(screen.getByText("Loading chart...")).toBeInTheDocument();
+    });
+
+    it("renders the chart once history loads", async () => {
+      fetchLatestMetrics.mockResolvedValue([]);
+      const series: HistorySeries[] = [
+        { unit: "percent", tags: { core: "0" }, points: [{ timestamp: 1, value: 42 }] },
+      ];
+      fetchMetricHistory.mockResolvedValue({ host: "web-1", name: "cpu.usage", start: 0, end: 1, series });
+
+      renderHost("web-1");
+
+      await waitFor(() => expect(screen.getByTestId("line-core 0")).toBeInTheDocument());
+    });
+
+    it("treats an unknown host as simply no chart data, not an error", async () => {
+      fetchLatestMetrics.mockRejectedValue(new HostNotFoundError("nope"));
+      fetchMetricHistory.mockRejectedValue(new HostNotFoundError("nope"));
+
+      renderHost("nope");
+
+      await waitFor(() => expect(screen.getByText("No data yet")).toBeInTheDocument());
+    });
+
+    it("shows an error message when the chart's request fails", async () => {
+      fetchLatestMetrics.mockResolvedValue([]);
+      fetchMetricHistory.mockRejectedValue(new ApiError("chart boom", 503));
+
+      renderHost("web-1");
+
+      await waitFor(() => {
+        const alerts = screen.getAllByRole("alert");
+        expect(alerts.some((el) => el.textContent === "chart boom")).toBe(true);
+      });
+    });
   });
 });

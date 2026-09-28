@@ -5,7 +5,10 @@ import { App } from "./App";
 
 // This file is a routing smoke test; HostPage's own data-fetching states are
 // covered by src/routes/HostPage.test.tsx.
-vi.mock("./api/client", () => ({ fetchLatestMetrics: vi.fn().mockReturnValue(new Promise(() => {})) }));
+vi.mock("./api/client", () => ({
+  fetchLatestMetrics: vi.fn().mockReturnValue(new Promise(() => {})),
+  fetchMetricHistory: vi.fn().mockReturnValue(new Promise(() => {})),
+}));
 
 function renderAt(path: string) {
   return render(
