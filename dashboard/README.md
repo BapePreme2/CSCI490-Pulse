@@ -35,12 +35,26 @@ npm run build
   single host's page).
 - `src/layout/AppShell.tsx` -- shared header + content area every route
   renders inside.
-- `src/routes/` -- one file per route. Both are placeholders for now; the
-  real content is built in later Week 5/6 tasks (see below).
+- `src/routes/FleetOverviewPage.tsx` -- placeholder; the real fleet list is
+  built in Week 6 (FLEET-03).
+- `src/routes/HostPage.tsx` -- the single-host overview: fetches
+  `GET /hosts/{host}/metrics/latest` and renders it as tiles.
+- `src/api/client.ts` -- the API client. Reads `VITE_API_BASE_URL` (default
+  `http://localhost:8000`); throws `HostNotFoundError` on a 404 and
+  `ApiError` for anything else non-2xx or unreachable.
+- `src/metrics/select.ts` -- picks entries out of a flat metrics list:
+  `findUntagged` (the one series with no tags, e.g. overall CPU) and
+  `metricsNamed` (every series under a name, e.g. per-core CPU).
+- `src/metrics/format.ts` -- display formatting (`%`, MB/GB, MB/s).
+- `src/components/*Tile.tsx` -- one tile per metric domain (CPU, memory,
+  disk, network), each reading straight from the flat metrics array via the
+  helpers above and rendering its own empty state.
 
-No API client exists yet -- that lands with DASH-04, which is the first
-page that actually reads from the ingest API's `/hosts/{host}/metrics/...`
-endpoints.
+The dashboard calls the ingest API directly from the browser (a different
+origin in dev), which needs the API's CORS support -- see
+`ingest/README.md`'s CORS section. If tiles never load and the browser
+console shows a CORS error, check `PULSE_CORS_ORIGINS` on the API side
+matches the URL you're loading the dashboard from.
 
 ## Notes
 
@@ -59,3 +73,4 @@ endpoints.
 | Task | File(s) |
 | --- | --- |
 | DASH-01 frontend scaffold | this directory: `package.json`, `vite.config.ts`, `src/main.tsx`, `src/App.tsx`, `src/layout/AppShell.tsx`, `src/App.test.tsx` |
+| DASH-04 single-host overview page | `src/routes/HostPage.tsx`, `src/api/client.ts`, `src/metrics/`, `src/components/*Tile.tsx` |

@@ -1,7 +1,11 @@
 import { render, screen } from "@testing-library/react";
 import { MemoryRouter } from "react-router-dom";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { App } from "./App";
+
+// This file is a routing smoke test; HostPage's own data-fetching states are
+// covered by src/routes/HostPage.test.tsx.
+vi.mock("./api/client", () => ({ fetchLatestMetrics: vi.fn().mockReturnValue(new Promise(() => {})) }));
 
 function renderAt(path: string) {
   return render(
