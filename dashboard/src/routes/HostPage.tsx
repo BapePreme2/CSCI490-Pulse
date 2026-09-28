@@ -7,7 +7,9 @@ import { DiskTile } from "../components/DiskTile";
 import { LineChart } from "../components/LineChart";
 import { MemoryTile } from "../components/MemoryTile";
 import { NetworkTile } from "../components/NetworkTile";
+import { TimeRangeSelector } from "../components/TimeRangeSelector";
 import { toChartSeries } from "../metrics/series";
+import { DEFAULT_TIME_RANGE, TIME_RANGES, type TimeRangeOption } from "../metrics/timeRanges";
 
 type LatestState =
   | { status: "loading" }
@@ -26,6 +28,7 @@ export function HostPage() {
   const { hostname } = useParams<{ hostname: string }>();
   const [latestState, setLatestState] = useState<LatestState>({ status: "loading" });
   const [historyState, setHistoryState] = useState<HistoryState>({ status: "loading" });
+  const [timeRange, setTimeRange] = useState<TimeRangeOption>(DEFAULT_TIME_RANGE);
 
   useEffect(() => {
     if (!hostname) return;
@@ -71,7 +74,10 @@ export function HostPage() {
     let cancelled = false;
     setHistoryState({ status: "loading" });
 
-    fetchMetricHistory(hostname, "cpu.usage")
+    const end = Date.now() / 1000;
+    const start = end - timeRange.seconds;
+
+    fetchMetricHistory(hostname, "cpu.usage", start, end)
       .then((history) => {
         if (!cancelled) setHistoryState({ status: "loaded", series: history.series });
       })
@@ -91,7 +97,7 @@ export function HostPage() {
     return () => {
       cancelled = true;
     };
-  }, [hostname]);
+  }, [hostname, timeRange]);
 
   if (!hostname) {
     return null;
@@ -115,7 +121,10 @@ export function HostPage() {
       )}
 
       <section className="chart-section">
-        <h2>CPU usage (last hour)</h2>
+        <div className="chart-section-header">
+          <h2>CPU usage (last {timeRange.label})</h2>
+          <TimeRangeSelector options={TIME_RANGES} selected={timeRange} onSelect={setTimeRange} />
+        </div>
         {historyState.status === "loading" && <p>Loading chart...</p>}
         {historyState.status === "error" && <p role="alert">{historyState.message}</p>}
         {historyState.status === "loaded" && (

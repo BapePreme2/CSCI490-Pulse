@@ -85,9 +85,38 @@ body {
   margin-top: 24px;
 }
 
+.chart-section-header {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 8px;
+}
+
 .chart-section h2 {
-  margin: 0 0 8px;
+  margin: 0;
   font-size: 1rem;
+}
+
+.time-range-selector {
+  display: flex;
+  gap: 4px;
+}
+
+.time-range-button {
+  padding: 4px 10px;
+  font-size: 0.85rem;
+  border: 1px solid rgba(128, 128, 128, 0.35);
+  border-radius: 6px;
+  background: transparent;
+  color: inherit;
+  cursor: pointer;
+}
+
+.time-range-button[aria-pressed="true"] {
+  background: currentColor;
+  color: canvas;
 }
 
 .line-chart-wrapper {

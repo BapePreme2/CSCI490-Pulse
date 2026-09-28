@@ -56,10 +56,14 @@ npm run build
 - `src/components/LineChart.tsx` -- a reusable time-series line chart (plain
   SVG, no charting library). Takes one or more `{label, points}` series and
   draws a colored line per series, with a legend once there's more than one.
-  `HostPage` uses it for a "CPU usage (last hour)" chart, one line per core,
+  `HostPage` uses it for a "CPU usage (last N)" chart, one line per core,
   via `GET /hosts/{host}/metrics/cpu.usage` and
   `src/metrics/series.ts#toChartSeries` (which turns each series' tags into
   its line's label, e.g. `{core: "0"}` -> `"core 0"`).
+- `src/components/TimeRangeSelector.tsx` + `src/metrics/timeRanges.ts` -- the
+  1h/6h/24h/7d buttons above the chart. Selecting one re-fetches the chart's
+  history with a new `start`/`end` window; it does not affect the tiles'
+  live polling.
 
 The dashboard calls the ingest API directly from the browser (a different
 origin in dev), which needs the API's CORS support -- see
@@ -87,3 +91,4 @@ matches the URL you're loading the dashboard from.
 | DASH-04 single-host overview page | `src/routes/HostPage.tsx`, `src/api/client.ts`, `src/metrics/`, `src/components/*Tile.tsx` |
 | DASH-05 reusable line chart component | `src/components/LineChart.tsx`, `src/metrics/series.ts`, wired into `src/routes/HostPage.tsx` |
 | DASH-06 live-polling tiles | `src/routes/HostPage.tsx` (`TILE_POLL_INTERVAL_MS`) |
+| DASH-07 time-range selector | `src/components/TimeRangeSelector.tsx`, `src/metrics/timeRanges.ts`, wired into `src/routes/HostPage.tsx` |

@@ -1,4 +1,4 @@
-import { act, render, screen, waitFor } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { MemoryRouter, Route, Routes } from "react-router-dom";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { ApiError, HostNotFoundError } from "../api/client";
@@ -97,11 +97,11 @@ describe("HostPage", () => {
 
     renderHost("web-1");
     await waitFor(() => expect(fetchLatestMetrics).toHaveBeenCalledWith("web-1"));
-    expect(fetchMetricHistory).toHaveBeenCalledWith("web-1", "cpu.usage");
+    expect(fetchMetricHistory).toHaveBeenCalledWith("web-1", "cpu.usage", expect.any(Number), expect.any(Number));
 
     renderHost("web-2");
     await waitFor(() => expect(fetchLatestMetrics).toHaveBeenCalledWith("web-2"));
-    expect(fetchMetricHistory).toHaveBeenCalledWith("web-2", "cpu.usage");
+    expect(fetchMetricHistory).toHaveBeenCalledWith("web-2", "cpu.usage", expect.any(Number), expect.any(Number));
   });
 
   describe("CPU history chart", () => {
@@ -227,6 +227,61 @@ describe("HostPage", () => {
       // interval would inflate this beyond a single extra call.
       expect(fetchLatestMetrics.mock.calls.length).toBe(callsAfterSwitch + 1);
       expect(fetchLatestMetrics).toHaveBeenCalledWith("web-2");
+    });
+  });
+
+  describe("time range selector", () => {
+    beforeEach(() => {
+      vi.useFakeTimers();
+      vi.setSystemTime(new Date("2024-01-01T00:00:00Z"));
+    });
+
+    afterEach(() => {
+      vi.useRealTimers();
+    });
+
+    it("fetches the default 1h range on first load, with its button pressed", async () => {
+      fetchLatestMetrics.mockResolvedValue([]);
+      fetchMetricHistory.mockResolvedValue({ host: "web-1", name: "cpu.usage", start: 0, end: 0, series: [] });
+
+      renderHost("web-1");
+      await flush();
+
+      const now = Date.now() / 1000;
+      expect(fetchMetricHistory).toHaveBeenCalledWith("web-1", "cpu.usage", now - 3600, now);
+      expect(screen.getByRole("button", { name: "1h" })).toHaveAttribute("aria-pressed", "true");
+    });
+
+    it("refetches with the new range and updates the heading when a different button is clicked", async () => {
+      fetchLatestMetrics.mockResolvedValue([]);
+      fetchMetricHistory.mockResolvedValue({ host: "web-1", name: "cpu.usage", start: 0, end: 0, series: [] });
+
+      renderHost("web-1");
+      await flush();
+      fetchMetricHistory.mockClear();
+
+      fireEvent.click(screen.getByRole("button", { name: "24h" }));
+      await flush();
+
+      const now = Date.now() / 1000;
+      expect(fetchMetricHistory).toHaveBeenCalledWith("web-1", "cpu.usage", now - 24 * 3600, now);
+      expect(screen.getByRole("button", { name: "24h" })).toHaveAttribute("aria-pressed", "true");
+      expect(screen.getByRole("button", { name: "1h" })).toHaveAttribute("aria-pressed", "false");
+      expect(screen.getByRole("heading", { name: /cpu usage \(last 24h\)/i })).toBeInTheDocument();
+    });
+
+    it("does not disturb tile polling when the time range changes", async () => {
+      fetchLatestMetrics.mockResolvedValue([metric(10)]);
+      fetchMetricHistory.mockResolvedValue({ host: "web-1", name: "cpu.usage", start: 0, end: 0, series: [] });
+
+      renderHost("web-1");
+      await flush();
+      const tileCallsBefore = fetchLatestMetrics.mock.calls.length;
+
+      fireEvent.click(screen.getByRole("button", { name: "7d" }));
+      await flush();
+
+      expect(fetchLatestMetrics.mock.calls.length).toBe(tileCallsBefore);
     });
   });
 });
