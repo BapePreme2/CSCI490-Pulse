@@ -1,9 +1,19 @@
-import { render, screen, waitFor } from "@testing-library/react";
+import { act, render, screen, waitFor } from "@testing-library/react";
 import { MemoryRouter, Route, Routes } from "react-router-dom";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { ApiError, HostNotFoundError } from "../api/client";
 import type { HistorySeries, LatestMetric } from "../api/types";
-import { HostPage } from "./HostPage";
+import { HostPage, TILE_POLL_INTERVAL_MS } from "./HostPage";
+
+function metric(value: number): LatestMetric {
+  return { name: "cpu.usage", unit: "percent", tags: {}, value, timestamp: 0 };
+}
+
+async function flush(ms = 0) {
+  await act(async () => {
+    await vi.advanceTimersByTimeAsync(ms);
+  });
+}
 
 const { fetchLatestMetrics, fetchMetricHistory } = vi.hoisted(() => ({
   fetchLatestMetrics: vi.fn(),
@@ -135,6 +145,88 @@ describe("HostPage", () => {
         const alerts = screen.getAllByRole("alert");
         expect(alerts.some((el) => el.textContent === "chart boom")).toBe(true);
       });
+    });
+  });
+
+  describe("live tile polling", () => {
+    beforeEach(() => {
+      vi.useFakeTimers();
+    });
+
+    afterEach(() => {
+      vi.useRealTimers();
+    });
+
+    it("refreshes tile data every TILE_POLL_INTERVAL_MS", async () => {
+      fetchLatestMetrics.mockResolvedValueOnce([metric(10)]).mockResolvedValueOnce([metric(20)]);
+
+      renderHost("web-1");
+      await flush();
+      expect(screen.getByText("10.0%")).toBeInTheDocument();
+
+      await flush(TILE_POLL_INTERVAL_MS);
+
+      expect(screen.getByText("20.0%")).toBeInTheDocument();
+      expect(fetchLatestMetrics).toHaveBeenCalledTimes(2);
+    });
+
+    it("keeps showing the last good tiles when a later poll fails", async () => {
+      fetchLatestMetrics.mockResolvedValueOnce([metric(10)]).mockRejectedValueOnce(new ApiError("blip", 503));
+
+      renderHost("web-1");
+      await flush();
+      expect(screen.getByText("10.0%")).toBeInTheDocument();
+
+      await flush(TILE_POLL_INTERVAL_MS);
+
+      expect(screen.getByText("10.0%")).toBeInTheDocument();
+      expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+    });
+
+    it("recovers automatically once a not-found host starts reporting", async () => {
+      fetchLatestMetrics.mockRejectedValueOnce(new HostNotFoundError("web-1")).mockResolvedValueOnce([metric(30)]);
+
+      renderHost("web-1");
+      await flush();
+      expect(screen.getByRole("alert")).toHaveTextContent(/no data has been reported/i);
+
+      await flush(TILE_POLL_INTERVAL_MS);
+
+      expect(screen.getByText("30.0%")).toBeInTheDocument();
+      expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+    });
+
+    it("stops polling once unmounted", async () => {
+      fetchLatestMetrics.mockResolvedValue([metric(10)]);
+
+      const { unmount } = renderHost("web-1");
+      await flush();
+      const callsBeforeUnmount = fetchLatestMetrics.mock.calls.length;
+      unmount();
+
+      await flush(TILE_POLL_INTERVAL_MS * 3);
+
+      expect(fetchLatestMetrics.mock.calls.length).toBe(callsBeforeUnmount);
+    });
+
+    it("does not leak the previous host's polling interval when the hostname changes", async () => {
+      fetchLatestMetrics.mockResolvedValue([metric(10)]);
+
+      const { unmount } = renderHost("web-1");
+      await flush();
+      unmount();
+      fetchLatestMetrics.mockClear();
+
+      renderHost("web-2");
+      await flush();
+      const callsAfterSwitch = fetchLatestMetrics.mock.calls.length;
+
+      await flush(TILE_POLL_INTERVAL_MS);
+
+      // Only web-2's interval should have fired once more; a leaked web-1
+      // interval would inflate this beyond a single extra call.
+      expect(fetchLatestMetrics.mock.calls.length).toBe(callsAfterSwitch + 1);
+      expect(fetchLatestMetrics).toHaveBeenCalledWith("web-2");
     });
   });
 });

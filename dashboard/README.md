@@ -38,7 +38,11 @@ npm run build
 - `src/routes/FleetOverviewPage.tsx` -- placeholder; the real fleet list is
   built in Week 6 (FLEET-03).
 - `src/routes/HostPage.tsx` -- the single-host overview: fetches
-  `GET /hosts/{host}/metrics/latest` and renders it as tiles.
+  `GET /hosts/{host}/metrics/latest` and renders it as tiles, re-polling
+  every `TILE_POLL_INTERVAL_MS` (5s) for live updates. Only the first load
+  can show loading/not-found/error; once tiles have shown real data, a
+  later poll that fails is skipped silently so the last good values stay
+  on screen instead of flickering to an error.
 - `src/api/client.ts` -- the API client. Reads `VITE_API_BASE_URL` (default
   `http://localhost:8000`); throws `HostNotFoundError` on a 404 and
   `ApiError` for anything else non-2xx or unreachable.
@@ -82,3 +86,4 @@ matches the URL you're loading the dashboard from.
 | DASH-01 frontend scaffold | this directory: `package.json`, `vite.config.ts`, `src/main.tsx`, `src/App.tsx`, `src/layout/AppShell.tsx`, `src/App.test.tsx` |
 | DASH-04 single-host overview page | `src/routes/HostPage.tsx`, `src/api/client.ts`, `src/metrics/`, `src/components/*Tile.tsx` |
 | DASH-05 reusable line chart component | `src/components/LineChart.tsx`, `src/metrics/series.ts`, wired into `src/routes/HostPage.tsx` |
+| DASH-06 live-polling tiles | `src/routes/HostPage.tsx` (`TILE_POLL_INTERVAL_MS`) |

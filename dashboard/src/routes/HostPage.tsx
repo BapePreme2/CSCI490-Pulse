@@ -20,6 +20,8 @@ type HistoryState =
   | { status: "loaded"; series: HistorySeries[] }
   | { status: "error"; message: string };
 
+export const TILE_POLL_INTERVAL_MS = 5000;
+
 export function HostPage() {
   const { hostname } = useParams<{ hostname: string }>();
   const [latestState, setLatestState] = useState<LatestState>({ status: "loading" });
@@ -29,25 +31,37 @@ export function HostPage() {
     if (!hostname) return;
 
     let cancelled = false;
+    // Only the very first load shows loading/not-found/error; once tiles
+    // have shown real data, a later poll failing (a brief network blip)
+    // just gets skipped so the last good values stay on screen.
+    let hasLoadedOnce = false;
     setLatestState({ status: "loading" });
 
-    fetchLatestMetrics(hostname)
-      .then((metrics) => {
-        if (!cancelled) setLatestState({ status: "loaded", metrics });
-      })
-      .catch((error: unknown) => {
-        if (cancelled) return;
-        if (error instanceof HostNotFoundError) {
-          setLatestState({ status: "not-found" });
-        } else if (error instanceof ApiError) {
-          setLatestState({ status: "error", message: error.message });
-        } else {
-          setLatestState({ status: "error", message: "Could not reach the ingestion API." });
-        }
-      });
+    const poll = () => {
+      fetchLatestMetrics(hostname)
+        .then((metrics) => {
+          if (cancelled) return;
+          hasLoadedOnce = true;
+          setLatestState({ status: "loaded", metrics });
+        })
+        .catch((error: unknown) => {
+          if (cancelled || hasLoadedOnce) return;
+          if (error instanceof HostNotFoundError) {
+            setLatestState({ status: "not-found" });
+          } else if (error instanceof ApiError) {
+            setLatestState({ status: "error", message: error.message });
+          } else {
+            setLatestState({ status: "error", message: "Could not reach the ingestion API." });
+          }
+        });
+    };
+
+    poll();
+    const interval = setInterval(poll, TILE_POLL_INTERVAL_MS);
 
     return () => {
       cancelled = true;
+      clearInterval(interval);
     };
   }, [hostname]);
 
