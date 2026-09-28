@@ -1,11 +1,12 @@
 from __future__ import annotations
 
 import logging
+import time
 from collections.abc import Iterable
 from contextlib import asynccontextmanager
 
 import psycopg
-from fastapi import FastAPI, HTTPException, Request, status
+from fastapi import FastAPI, HTTPException, Query, Request, status
 from fastapi.responses import JSONResponse
 from psycopg_pool import PoolTimeout
 
@@ -18,6 +19,9 @@ from pulse_ingest.store import PostgresMetricStore, Store
 logger = logging.getLogger(__name__)
 
 AGENT_PATHS = {"/metrics"}
+
+DEFAULT_HISTORY_RANGE_SECONDS = 3600
+MAX_HISTORY_RANGE_SECONDS = 30 * 24 * 3600
 
 
 def create_app(api_keys: Iterable[str] | None = None, store: Store | None = None) -> FastAPI:
@@ -85,6 +89,49 @@ def create_app(api_keys: Iterable[str] | None = None, store: Store | None = None
             "metrics": [
                 {"name": m.name, "unit": m.unit, "tags": m.tags, "value": m.value, "timestamp": m.timestamp}
                 for m in metrics
+            ],
+        }
+
+    @app.get("/hosts/{host}/metrics/{name}")
+    def metric_history(
+        host: str,
+        name: str,
+        start: float | None = Query(None, description="Unix epoch seconds; defaults to end - 1h"),
+        end: float | None = Query(None, description="Unix epoch seconds; defaults to now"),
+    ) -> dict:
+        try:
+            known = store.host_exists(host)
+        except (psycopg.OperationalError, PoolTimeout):
+            raise _database_unavailable()
+        if not known:
+            raise HTTPException(status.HTTP_404_NOT_FOUND, detail=f"Unknown host: {host}")
+
+        end = end if end is not None else time.time()
+        start = start if start is not None else end - DEFAULT_HISTORY_RANGE_SECONDS
+        if start >= end:
+            raise HTTPException(status.HTTP_400_BAD_REQUEST, detail="start must be before end")
+        if end - start > MAX_HISTORY_RANGE_SECONDS:
+            raise HTTPException(
+                status.HTTP_400_BAD_REQUEST,
+                detail=f"range cannot exceed {MAX_HISTORY_RANGE_SECONDS} seconds",
+            )
+
+        try:
+            series = store.get_history(host, name, start, end)
+        except (psycopg.OperationalError, PoolTimeout):
+            raise _database_unavailable()
+        return {
+            "host": host,
+            "name": name,
+            "start": start,
+            "end": end,
+            "series": [
+                {
+                    "unit": s.unit,
+                    "tags": s.tags,
+                    "points": [{"timestamp": p.timestamp, "value": p.value} for p in s.points],
+                }
+                for s in series
             ],
         }
 

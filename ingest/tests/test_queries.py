@@ -80,3 +80,69 @@ def test_get_latest_does_not_mix_series_from_different_hosts(store):
     (a,) = store.get_latest("web-1")
     (b,) = store.get_latest("web-2")
     assert (a.value, b.value) == (1.0, 2.0)
+
+
+def test_get_history_returns_points_within_range_only(store):
+    store.write_batch(batch_dict(
+        "web-1",
+        metric(value=1.0, ts=TS),
+        metric(value=2.0, ts=TS + 100),
+        metric(value=3.0, ts=TS + 200),
+    ))
+
+    (series,) = store.get_history("web-1", "cpu.usage", TS + 50, TS + 150)
+
+    assert [p.value for p in series.points] == [2.0]
+
+
+def test_get_history_range_is_inclusive_on_both_ends(store):
+    store.write_batch(batch_dict("web-1", metric(value=1.0, ts=TS), metric(value=2.0, ts=TS + 10)))
+
+    (series,) = store.get_history("web-1", "cpu.usage", TS, TS + 10)
+
+    assert [p.value for p in series.points] == [1.0, 2.0]
+
+
+def test_get_history_orders_points_by_time(store):
+    store.write_batch(batch_dict(
+        "web-1", metric(value=3.0, ts=TS + 20), metric(value=1.0, ts=TS), metric(value=2.0, ts=TS + 10)
+    ))
+
+    (series,) = store.get_history("web-1", "cpu.usage", TS, TS + 20)
+
+    assert [p.value for p in series.points] == [1.0, 2.0, 3.0]
+
+
+def test_get_history_splits_series_by_tags(store):
+    store.write_batch(batch_dict(
+        "web-1",
+        metric(core="0", value=10.0, ts=TS),
+        metric(core="1", value=20.0, ts=TS),
+        metric(core="0", value=15.0, ts=TS + 10),
+    ))
+
+    series = {s.tags["core"]: s for s in store.get_history("web-1", "cpu.usage", TS, TS + 10)}
+
+    assert [p.value for p in series["0"].points] == [10.0, 15.0]
+    assert [p.value for p in series["1"].points] == [20.0]
+
+
+def test_get_history_is_empty_for_a_metric_the_host_never_reported(store):
+    store.write_batch(batch_dict("web-1", metric(name="cpu.usage")))
+
+    assert store.get_history("web-1", "memory.used", TS - 100, TS + 100) == []
+
+
+def test_get_history_does_not_mix_different_hosts(store):
+    store.write_batch(batch_dict("web-1", metric(value=1.0, ts=TS)))
+    store.write_batch(batch_dict("web-2", metric(value=2.0, ts=TS)))
+
+    (series,) = store.get_history("web-1", "cpu.usage", TS, TS)
+
+    assert [p.value for p in series.points] == [1.0]
+
+
+def test_get_history_excludes_samples_outside_the_range(store):
+    store.write_batch(batch_dict("web-1", metric(value=1.0, ts=TS - 1000), metric(value=2.0, ts=TS + 1000)))
+
+    assert store.get_history("web-1", "cpu.usage", TS - 1, TS + 1) == []

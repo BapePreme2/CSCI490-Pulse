@@ -7,7 +7,7 @@ class FakeStore:
     def __init__(self, error: Exception | None = None, hosts: dict | None = None):
         self.batches = []
         self.error = error
-        # host -> {"latest": [LatestMetric, ...]}
+        # host -> {"latest": [LatestMetric, ...], "history": {name: [HistorySeries, ...]}}
         self._hosts = hosts or {}
 
     def write_batch(self, batch):
@@ -25,3 +25,8 @@ class FakeStore:
         if self.error:
             raise self.error
         return self._hosts.get(host, {}).get("latest", [])
+
+    def get_history(self, host, name, start, end):
+        if self.error:
+            raise self.error
+        return self._hosts.get(host, {}).get("history", {}).get(name, [])

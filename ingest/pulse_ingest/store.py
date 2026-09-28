@@ -1,6 +1,7 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+import json
+from dataclasses import dataclass, field
 from typing import Protocol
 
 from psycopg.types.json import Jsonb
@@ -43,6 +44,17 @@ WHERE h.hostname = %s
 ORDER BY v.metric_id, v.tags, v.ts DESC
 """
 
+_HISTORY_QUERY = """
+SELECT m.unit, v.tags, extract(epoch FROM v.ts), v.value
+FROM metric_values v
+JOIN hosts h ON h.id = v.host_id
+JOIN metrics m ON m.id = v.metric_id
+WHERE h.hostname = %s AND m.name = %s
+  AND v.ts >= to_timestamp(%s) AND v.ts <= to_timestamp(%s)
+ORDER BY m.unit, v.tags, v.ts
+"""
+
+
 @dataclass(frozen=True)
 class WriteResult:
     stored: int
@@ -57,6 +69,19 @@ class LatestMetric:
     timestamp: float
 
 
+@dataclass(frozen=True)
+class HistoryPoint:
+    timestamp: float
+    value: float
+
+
+@dataclass(frozen=True)
+class HistorySeries:
+    unit: str
+    tags: dict[str, str]
+    points: list[HistoryPoint] = field(default_factory=list)
+
+
 class MetricStore(Protocol):
     def write_batch(self, batch: MetricBatch) -> WriteResult:
         """Persist a batch atomically; already-stored samples are skipped."""
@@ -67,6 +92,9 @@ class QueryStore(Protocol):
 
     def get_latest(self, host: str) -> list[LatestMetric]:
         """The most recent value of every series (metric + tags) a host reports."""
+
+    def get_history(self, host: str, name: str, start: float, end: float) -> list[HistorySeries]:
+        """All samples for one metric name in [start, end], grouped into series by tags."""
 
 
 class Store(MetricStore, QueryStore, Protocol):
@@ -128,3 +156,17 @@ class PostgresMetricStore:
             LatestMetric(name=name, unit=unit, tags=tags, value=value, timestamp=float(ts))
             for name, unit, tags, value, ts in rows
         ]
+
+    def get_history(self, host: str, name: str, start: float, end: float) -> list[HistorySeries]:
+        with self._pool.connection() as conn:
+            rows = conn.execute(_HISTORY_QUERY, (host, name, start, end)).fetchall()
+
+        series_by_key: dict[str, HistorySeries] = {}
+        order: list[str] = []
+        for unit, tags, ts, value in rows:
+            key = f"{unit}\x00{json.dumps(tags, sort_keys=True)}"
+            if key not in series_by_key:
+                series_by_key[key] = HistorySeries(unit=unit, tags=tags)
+                order.append(key)
+            series_by_key[key].points.append(HistoryPoint(timestamp=float(ts), value=value))
+        return [series_by_key[key] for key in order]

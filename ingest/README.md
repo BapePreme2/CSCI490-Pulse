@@ -124,7 +124,31 @@ curl http://127.0.0.1:8000/hosts/web-1/metrics/latest
 ```
 
 `404` if the host has never reported. `200` with `"metrics": []` if it has
-but currently has no samples. `503` if the database is unreachable.
+but currently has no samples.
+
+**`GET /hosts/{host}/metrics/{name}`** -- every sample for one metric name
+in a time range, grouped into one series per distinct tag set (so a
+multi-core or multi-disk metric renders as separate chart lines without
+extra client-side work).
+
+```bash
+curl "http://127.0.0.1:8000/hosts/web-1/metrics/cpu.usage?start=1789415000&end=1789419042"
+```
+
+```json
+{
+  "host": "web-1", "name": "cpu.usage", "start": 1789415000, "end": 1789419042,
+  "series": [
+    {"unit": "percent", "tags": {"core": "0"}, "points": [{"timestamp": 1789419042.0, "value": 12.5}]}
+  ]
+}
+```
+
+`start`/`end` are optional Unix-epoch-seconds query params; they default to
+the last hour and are capped at a 30-day span (`400` if exceeded, or if
+`start >= end`). `404` if the host is unknown; `200` with `"series": []` if
+the host exists but has no data for that metric name. Both endpoints return
+`503` if the database is unreachable.
 
 ## Write path
 
@@ -185,3 +209,4 @@ half-applied. To add one, create the next numbered file, e.g.
 | Task | File(s) |
 | --- | --- |
 | DASH-02 latest-values endpoint | `pulse_ingest/store.py` (`get_latest`), `pulse_ingest/app.py`, `tests/test_queries.py`, `tests/test_dashboard_endpoints.py` |
+| DASH-03 historical-values endpoint | `pulse_ingest/store.py` (`get_history`), `pulse_ingest/app.py`, `tests/test_queries.py`, `tests/test_dashboard_endpoints.py` |
