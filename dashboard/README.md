@@ -83,6 +83,27 @@ matches the URL you're loading the dashboard from.
   scaffold task; revisit before this ever runs somewhere untrusted can reach
   the dev server.
 
+## Styling
+
+`src/index.css` defines the whole visual system as CSS custom properties on
+`:root` (`--color-bg`, `--color-surface`, `--color-text`, `--color-muted`,
+`--color-border`, `--color-accent`, spacing scale, etc.), redefined under
+`@media (prefers-color-scheme: dark)`. Every component class reads these
+tokens rather than hardcoding colors, so both themes come from one source
+of truth. Page content is centered with a max width (900px) so it doesn't
+stretch edge-to-edge on wide screens; tiles use `auto-fit` grid columns and
+the header/selector wrap, so the layout holds down to a 360px phone width
+with no horizontal scroll (verified with real screenshots, not just
+reasoning about the CSS -- see the bug note below).
+
+**A real bug this caught:** the selected time-range button was invisible
+text-on-background of the same color. `background: currentColor` and
+`color: canvas` were in the *same* CSS rule, and `currentColor` resolves to
+that rule's own final `color` value, so both properties ended up the same
+color. No automated test caught it, since none of them render real CSS.
+Fixed by using explicit `--color-accent` / `--color-accent-contrast`
+tokens instead of a self-referential `currentColor`.
+
 ## Task mapping (Week 5)
 
 | Task | File(s) |
@@ -92,3 +113,4 @@ matches the URL you're loading the dashboard from.
 | DASH-05 reusable line chart component | `src/components/LineChart.tsx`, `src/metrics/series.ts`, wired into `src/routes/HostPage.tsx` |
 | DASH-06 live-polling tiles | `src/routes/HostPage.tsx` (`TILE_POLL_INTERVAL_MS`) |
 | DASH-07 time-range selector | `src/components/TimeRangeSelector.tsx`, `src/metrics/timeRanges.ts`, wired into `src/routes/HostPage.tsx` |
+| DASH-08 style pass + responsive layout | `src/index.css`, `src/routes/HostPage.tsx` (`page-status` classes) |

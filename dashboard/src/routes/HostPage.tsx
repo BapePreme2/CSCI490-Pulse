@@ -106,11 +106,17 @@ export function HostPage() {
   return (
     <section>
       <h1>{hostname}</h1>
-      {latestState.status === "loading" && <p>Loading...</p>}
+      {latestState.status === "loading" && <p className="page-status">Loading...</p>}
       {latestState.status === "not-found" && (
-        <p role="alert">No data has been reported yet for &quot;{hostname}&quot;.</p>
+        <p role="alert" className="page-status page-status--warning">
+          No data has been reported yet for &quot;{hostname}&quot;.
+        </p>
       )}
-      {latestState.status === "error" && <p role="alert">{latestState.message}</p>}
+      {latestState.status === "error" && (
+        <p role="alert" className="page-status page-status--error">
+          {latestState.message}
+        </p>
+      )}
       {latestState.status === "loaded" && (
         <div className="tile-grid">
           <CpuTile metrics={latestState.metrics} />
@@ -125,8 +131,12 @@ export function HostPage() {
           <h2>CPU usage (last {timeRange.label})</h2>
           <TimeRangeSelector options={TIME_RANGES} selected={timeRange} onSelect={setTimeRange} />
         </div>
-        {historyState.status === "loading" && <p>Loading chart...</p>}
-        {historyState.status === "error" && <p role="alert">{historyState.message}</p>}
+        {historyState.status === "loading" && <p className="page-status">Loading chart...</p>}
+        {historyState.status === "error" && (
+          <p role="alert" className="page-status page-status--error">
+            {historyState.message}
+          </p>
+        )}
         {historyState.status === "loaded" && (
           <LineChart series={toChartSeries(historyState.series)} unit="%" />
         )}
