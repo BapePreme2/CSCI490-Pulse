@@ -1,12 +1,14 @@
 from __future__ import annotations
 
 import logging
+import os
 import time
 from collections.abc import Iterable
 from contextlib import asynccontextmanager
 
 import psycopg
 from fastapi import FastAPI, HTTPException, Query, Request, status
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from psycopg_pool import PoolTimeout
 
@@ -24,10 +26,21 @@ DEFAULT_HISTORY_RANGE_SECONDS = 3600
 MAX_HISTORY_RANGE_SECONDS = 30 * 24 * 3600
 
 
-def create_app(api_keys: Iterable[str] | None = None, store: Store | None = None) -> FastAPI:
+def _default_cors_origins() -> list[str]:
+    raw = os.environ.get("PULSE_CORS_ORIGINS", "http://localhost:5173")
+    return [origin.strip() for origin in raw.split(",") if origin.strip()]
+
+
+def create_app(
+    api_keys: Iterable[str] | None = None,
+    store: Store | None = None,
+    cors_origins: Iterable[str] | None = None,
+) -> FastAPI:
     keys = frozenset(api_keys) if api_keys is not None else load_api_keys()
     if not keys:
         logger.warning("No API keys configured (PULSE_API_KEYS); all agent requests will be rejected")
+
+    origins = list(cors_origins) if cors_origins is not None else _default_cors_origins()
 
     owned_store = PostgresMetricStore(database_url()) if store is None else None
     store = store or owned_store
@@ -55,6 +68,20 @@ def create_app(api_keys: Iterable[str] | None = None, store: Store | None = None
                     headers={"WWW-Authenticate": "Bearer"},
                 )
         return await call_next(request)
+
+    # Added after the auth middleware above so it wraps outermost: Starlette's
+    # add_middleware() inserts at the front of the middleware list, so the
+    # *last* middleware added ends up outermost. CORS must be outermost so it
+    # can directly answer a browser's preflight OPTIONS request before that
+    # request ever reaches require_api_key, and so it wraps every response,
+    # including 401/404/503 ones, so the browser's JS is allowed to read
+    # error bodies too.
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=origins,
+        allow_methods=["GET", "POST"],
+        allow_headers=["Authorization", "Content-Type"],
+    )
 
     @app.get("/health")
     def health() -> dict[str, str]:

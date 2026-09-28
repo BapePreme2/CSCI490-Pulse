@@ -66,6 +66,25 @@ curl -X POST http://127.0.0.1:8000/metrics \
   (a warning is logged at startup).
 - `/health` needs no key so load balancers and uptime checks can reach it.
 
+## CORS (for the browser-based dashboard)
+
+The dashboard runs on its own origin (`http://localhost:5173` in dev) and
+calls this API directly from the browser, so the API must send CORS headers
+or the browser silently blocks the dashboard's JavaScript from reading the
+response -- the request still succeeds server-side, but `fetch()` in the
+browser sees it as a network failure either way.
+
+Allowed origins come from `PULSE_CORS_ORIGINS` (comma-separated), defaulting
+to `http://localhost:5173`. Set it to the dashboard's real URL(s) in any
+other environment.
+
+`CORSMiddleware` is added *after* the API-key middleware in the code so that,
+per Starlette's `add_middleware` (which inserts at the front of the
+middleware list), it ends up outermost -- able to answer a browser's
+preflight `OPTIONS` request directly, and to attach the CORS header to every
+response, including `401`/`404`/`503` ones, so the dashboard's error states
+render correctly too.
+
 ## Payload schema (`POST /metrics`)
 
 Defined in `pulse_ingest/schemas.py` (`MetricBatch`, `MetricIn`). One request
