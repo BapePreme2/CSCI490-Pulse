@@ -18,6 +18,22 @@ describe("CpuTile", () => {
     expect(items).toEqual(["core 0: 5.0%", "core 1: 10.0%"]);
   });
 
+  it("still finds the overall reading when every metric carries an unrelated tag", () => {
+    // Regression: an agent config with any custom tag (e.g. environment)
+    // attaches it to every metric, including the "overall" one -- that
+    // must not be mistaken for a per-core reading.
+    render(
+      <CpuTile
+        metrics={[
+          metric({ environment: "demo" }, 42.5),
+          metric({ core: "0", environment: "demo" }, 5),
+        ]}
+      />,
+    );
+
+    expect(screen.getByText("42.5%")).toBeInTheDocument();
+  });
+
   it("shows an empty state when there is no overall reading", () => {
     render(<CpuTile metrics={[]} />);
 

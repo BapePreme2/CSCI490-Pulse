@@ -138,7 +138,7 @@ export function HostPage() {
           </p>
         )}
         {historyState.status === "loaded" && (
-          <LineChart series={toChartSeries(historyState.series)} unit="%" />
+          <LineChart series={toChartSeries(historyState.series, ["core"])} unit="%" />
         )}
       </section>
     </section>

@@ -1,10 +1,10 @@
 import type { LatestMetric } from "../api/types";
 import { formatPercent } from "../metrics/format";
-import { findUntagged, metricsNamed } from "../metrics/select";
+import { findWithoutTag, metricsNamed } from "../metrics/select";
 import { MetricTile } from "./MetricTile";
 
 export function CpuTile({ metrics }: { metrics: LatestMetric[] }) {
-  const overall = findUntagged(metrics, "cpu.usage");
+  const overall = findWithoutTag(metrics, "cpu.usage", "core");
   const perCore = metricsNamed(metrics, "cpu.usage")
     .filter((m) => "core" in m.tags)
     .sort((a, b) => Number(a.tags.core) - Number(b.tags.core));

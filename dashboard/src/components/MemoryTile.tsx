@@ -1,11 +1,13 @@
 import type { LatestMetric } from "../api/types";
 import { formatMb, formatPercent } from "../metrics/format";
-import { findUntagged } from "../metrics/select";
+import { metricsNamed } from "../metrics/select";
 import { MetricTile } from "./MetricTile";
 
 export function MemoryTile({ metrics }: { metrics: LatestMetric[] }) {
-  const total = findUntagged(metrics, "memory.total");
-  const used = findUntagged(metrics, "memory.used");
+  // Memory metrics have no distinguishing tag at all (unlike per-core CPU
+  // or per-mount disk), so the first match is the only one.
+  const total = metricsNamed(metrics, "memory.total")[0];
+  const used = metricsNamed(metrics, "memory.used")[0];
 
   if (!total || !used || total.value <= 0) {
     return (

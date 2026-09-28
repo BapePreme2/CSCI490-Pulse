@@ -47,8 +47,12 @@ npm run build
   `http://localhost:8000`); throws `HostNotFoundError` on a 404 and
   `ApiError` for anything else non-2xx or unreachable.
 - `src/metrics/select.ts` -- picks entries out of a flat metrics list:
-  `findUntagged` (the one series with no tags, e.g. overall CPU) and
-  `metricsNamed` (every series under a name, e.g. per-core CPU).
+  `findWithoutTag(metrics, name, tagKey)` (the one series lacking a specific
+  tag, e.g. overall CPU has no `core` tag) and `metricsNamed` (every series
+  under a name, e.g. per-core CPU). `findWithoutTag` checks one tag key
+  rather than requiring zero tags total, because an agent's configured
+  `tags` (e.g. `environment`) land on every metric it reports, including
+  the "overall" one -- see the bug note below.
 - `src/metrics/format.ts` -- display formatting (`%`, MB/GB, MB/s).
 - `src/components/*Tile.tsx` -- one tile per metric domain (CPU, memory,
   disk, network), each reading straight from the flat metrics array via the
@@ -59,7 +63,9 @@ npm run build
   `HostPage` uses it for a "CPU usage (last N)" chart, one line per core,
   via `GET /hosts/{host}/metrics/cpu.usage` and
   `src/metrics/series.ts#toChartSeries` (which turns each series' tags into
-  its line's label, e.g. `{core: "0"}` -> `"core 0"`).
+  its line's label, e.g. `{core: "0"}` -> `"core 0"`; pass a relevant-key
+  allowlist, e.g. `["core"]`, so an agent's other configured tags don't
+  clutter every label).
 - `src/components/TimeRangeSelector.tsx` + `src/metrics/timeRanges.ts` -- the
   1h/6h/24h/7d buttons above the chart. Selecting one re-fetches the chart's
   history with a new `start`/`end` window; it does not affect the tiles'
@@ -103,6 +109,31 @@ that rule's own final `color` value, so both properties ended up the same
 color. No automated test caught it, since none of them render real CSS.
 Fixed by using explicit `--color-accent` / `--color-accent-contrast`
 tokens instead of a self-referential `currentColor`.
+
+## A real bug an actual agent config caught
+
+The CPU and Memory tiles silently showed "No data yet" for any agent
+configured with a custom tag (`tags: {environment: demo}` in
+`agent/config.yaml`, say) -- which is a normal thing to set, and exactly
+what this project's own demo config uses. Root cause: the agent attaches
+every configured tag to every metric it reports (`agent.py`'s
+`collect_once`), but only `host` gets stripped server-side; everything
+else, including e.g. `environment`, stays on every sample, the "overall"
+one included. The tiles' old `findUntagged` helper required *zero* tags to
+recognize that overall reading, so it never matched once any tag was
+configured. `DiskTile`/`NetworkTile` were unaffected only because they
+group by their own tag (`mount`/`interface`) and never looked for an
+entirely-untagged series.
+
+No automated test caught it, because every existing fixture used a bare
+`tags: {}` for the "overall" case -- accidentally the one scenario that
+can't occur once an agent config sets any tag at all. Caught only by
+running the real agent, with its own demo config, against the real
+dashboard and looking at it in an actual browser. Fixed by checking for
+the absence of one specific tag key (`findWithoutTag`) instead of the
+absence of every tag, and by giving the chart's label function the same
+kind of allowlist so the legend does not repeat `environment demo` on
+every line either.
 
 ## Task mapping (Week 5)
 

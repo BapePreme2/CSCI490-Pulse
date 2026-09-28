@@ -1,24 +1,33 @@
 import { describe, expect, it } from "vitest";
 import type { LatestMetric } from "../api/types";
-import { findUntagged, metricsNamed } from "./select";
+import { findWithoutTag, metricsNamed } from "./select";
 
 function metric(name: string, tags: Record<string, string> = {}, value = 1): LatestMetric {
   return { name, unit: "unit", tags, value, timestamp: 0 };
 }
 
-describe("findUntagged", () => {
-  it("finds the entry with no tags among several tagged ones", () => {
+describe("findWithoutTag", () => {
+  it("finds the entry lacking the given tag key among several that have it", () => {
     const metrics = [metric("cpu.usage", { core: "0" }), metric("cpu.usage", {}, 42)];
 
-    expect(findUntagged(metrics, "cpu.usage")?.value).toBe(42);
+    expect(findWithoutTag(metrics, "cpu.usage", "core")?.value).toBe(42);
   });
 
-  it("returns undefined when every entry under that name is tagged", () => {
-    expect(findUntagged([metric("cpu.usage", { core: "0" })], "cpu.usage")).toBeUndefined();
+  it("still matches when the entry carries an unrelated tag, e.g. an agent's configured environment", () => {
+    const metrics = [
+      metric("cpu.usage", { core: "0", environment: "demo" }),
+      metric("cpu.usage", { environment: "demo" }, 42),
+    ];
+
+    expect(findWithoutTag(metrics, "cpu.usage", "core")?.value).toBe(42);
+  });
+
+  it("returns undefined when every entry under that name has the tag", () => {
+    expect(findWithoutTag([metric("cpu.usage", { core: "0" })], "cpu.usage", "core")).toBeUndefined();
   });
 
   it("returns undefined when the name does not exist at all", () => {
-    expect(findUntagged([], "cpu.usage")).toBeUndefined();
+    expect(findWithoutTag([], "cpu.usage", "core")).toBeUndefined();
   });
 });
 
