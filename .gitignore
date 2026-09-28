@@ -5,6 +5,13 @@ __pycache__/
 *.egg-info/
 build/
 dist/
+node_modules/
+*.tsbuildinfo
+
+# tsc -b emits these next to vite.config.ts because tsconfig.node.json is a
+# composite project with no outDir set.
+/dashboard/vite.config.js
+/dashboard/vite.config.d.ts
 
 # Real per-host config with a live API key. Commit config.example.yaml instead.
 config.yaml
