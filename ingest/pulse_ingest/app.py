@@ -13,16 +13,14 @@ from pulse_ingest import __version__
 from pulse_ingest.auth import extract_bearer_token, is_valid_key, load_api_keys
 from pulse_ingest.migrate import database_url
 from pulse_ingest.schemas import MetricBatch
-from pulse_ingest.store import MetricStore, PostgresMetricStore
+from pulse_ingest.store import PostgresMetricStore, Store
 
 logger = logging.getLogger(__name__)
 
 AGENT_PATHS = {"/metrics"}
 
 
-def create_app(
-    api_keys: Iterable[str] | None = None, store: MetricStore | None = None
-) -> FastAPI:
+def create_app(api_keys: Iterable[str] | None = None, store: Store | None = None) -> FastAPI:
     keys = frozenset(api_keys) if api_keys is not None else load_api_keys()
     if not keys:
         logger.warning("No API keys configured (PULSE_API_KEYS); all agent requests will be rejected")
@@ -69,7 +67,33 @@ def create_app(
             )
         return {"accepted": len(batch.metrics), "stored": result.stored}
 
+    @app.get("/hosts/{host}/metrics/latest")
+    def latest_metrics(host: str) -> dict:
+        try:
+            known = store.host_exists(host)
+        except (psycopg.OperationalError, PoolTimeout):
+            raise _database_unavailable()
+        if not known:
+            raise HTTPException(status.HTTP_404_NOT_FOUND, detail=f"Unknown host: {host}")
+
+        try:
+            metrics = store.get_latest(host)
+        except (psycopg.OperationalError, PoolTimeout):
+            raise _database_unavailable()
+        return {
+            "host": host,
+            "metrics": [
+                {"name": m.name, "unit": m.unit, "tags": m.tags, "value": m.value, "timestamp": m.timestamp}
+                for m in metrics
+            ],
+        }
+
     return app
+
+
+def _database_unavailable() -> HTTPException:
+    logger.exception("Database unavailable")
+    return HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, detail="Database unavailable")
 
 
 app = create_app()

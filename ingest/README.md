@@ -101,6 +101,31 @@ Responses:
 - `503` when the database is unreachable. Agents should treat this as
   retryable (unlike `422`, which will never succeed on retry).
 
+## Read endpoints (for the dashboard)
+
+Neither endpoint requires an API key, since the dashboard is a trusted
+internal client reading its own database, not an agent.
+
+**`GET /hosts/{host}/metrics/latest`** -- the most recent value of every
+series (metric + tags) the host has reported.
+
+```bash
+curl http://127.0.0.1:8000/hosts/web-1/metrics/latest
+```
+
+```json
+{
+  "host": "web-1",
+  "metrics": [
+    {"name": "cpu.usage", "unit": "percent", "tags": {"core": "0"}, "value": 12.5, "timestamp": 1789419042.0},
+    {"name": "cpu.usage", "unit": "percent", "tags": {"core": "1"}, "value": 30.0, "timestamp": 1789419042.0}
+  ]
+}
+```
+
+`404` if the host has never reported. `200` with `"metrics": []` if it has
+but currently has no samples. `503` if the database is unreachable.
+
 ## Write path
 
 `pulse_ingest/store.py` (`PostgresMetricStore`) writes each batch in a single
@@ -154,3 +179,9 @@ half-applied. To add one, create the next numbered file, e.g.
 | INGEST-05 agent → API → Postgres round trip | `tests/test_round_trip.py` |
 | STORE-01 Postgres schema | `migrations/001_initial_schema.sql` |
 | STORE-02 migrations | `pulse_ingest/migrate.py`, `tests/test_migrate.py`, `scripts/dev-db.sh` |
+
+## Task mapping (Week 5)
+
+| Task | File(s) |
+| --- | --- |
+| DASH-02 latest-values endpoint | `pulse_ingest/store.py` (`get_latest`), `pulse_ingest/app.py`, `tests/test_queries.py`, `tests/test_dashboard_endpoints.py` |

@@ -28,15 +28,49 @@ VALUES (%s, %s, to_timestamp(%s), %s, %s)
 ON CONFLICT DO NOTHING
 """
 
+_HOST_EXISTS = "SELECT 1 FROM hosts WHERE hostname = %s"
+
+# One row per currently-reporting series: DISTINCT ON picks the latest ts
+# within each (metric_id, tags) group, which is why the ORDER BY must lead
+# with those same two columns.
+_LATEST_QUERY = """
+SELECT DISTINCT ON (v.metric_id, v.tags)
+    m.name, m.unit, v.tags, v.value, extract(epoch FROM v.ts)
+FROM metric_values v
+JOIN hosts h ON h.id = v.host_id
+JOIN metrics m ON m.id = v.metric_id
+WHERE h.hostname = %s
+ORDER BY v.metric_id, v.tags, v.ts DESC
+"""
 
 @dataclass(frozen=True)
 class WriteResult:
     stored: int
 
 
+@dataclass(frozen=True)
+class LatestMetric:
+    name: str
+    unit: str
+    tags: dict[str, str]
+    value: float
+    timestamp: float
+
+
 class MetricStore(Protocol):
     def write_batch(self, batch: MetricBatch) -> WriteResult:
         """Persist a batch atomically; already-stored samples are skipped."""
+
+
+class QueryStore(Protocol):
+    def host_exists(self, host: str) -> bool: ...
+
+    def get_latest(self, host: str) -> list[LatestMetric]:
+        """The most recent value of every series (metric + tags) a host reports."""
+
+
+class Store(MetricStore, QueryStore, Protocol):
+    """Everything the API needs from a storage backend."""
 
 
 class PostgresMetricStore:
@@ -82,3 +116,15 @@ class PostgresMetricStore:
             ]
             cur.executemany(_INSERT_VALUE, rows)
             return WriteResult(stored=cur.rowcount)
+
+    def host_exists(self, host: str) -> bool:
+        with self._pool.connection() as conn:
+            return conn.execute(_HOST_EXISTS, (host,)).fetchone() is not None
+
+    def get_latest(self, host: str) -> list[LatestMetric]:
+        with self._pool.connection() as conn:
+            rows = conn.execute(_LATEST_QUERY, (host,)).fetchall()
+        return [
+            LatestMetric(name=name, unit=unit, tags=tags, value=value, timestamp=float(ts))
+            for name, unit, tags, value, ts in rows
+        ]
