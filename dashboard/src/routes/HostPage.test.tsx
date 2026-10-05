@@ -2,11 +2,23 @@ import { act, fireEvent, render, screen, waitFor } from "@testing-library/react"
 import { MemoryRouter, Route, Routes } from "react-router-dom";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { ApiError, HostNotFoundError } from "../api/client";
-import type { HistorySeries, LatestMetric } from "../api/types";
+import type { HistorySeries, HostSummary, LatestMetric } from "../api/types";
 import { HostPage, TILE_POLL_INTERVAL_MS } from "./HostPage";
 
 function metric(value: number): LatestMetric {
   return { name: "cpu.usage", unit: "percent", tags: {}, value, timestamp: 0 };
+}
+
+function summary(overrides: Partial<HostSummary> = {}): HostSummary {
+  return {
+    hostname: "web-1",
+    first_seen_at: 0,
+    last_seen_at: 0,
+    status: "online",
+    cpu_usage: null,
+    memory_percent: null,
+    ...overrides,
+  };
 }
 
 async function flush(ms = 0) {
@@ -15,14 +27,15 @@ async function flush(ms = 0) {
   });
 }
 
-const { fetchLatestMetrics, fetchMetricHistory } = vi.hoisted(() => ({
+const { fetchLatestMetrics, fetchMetricHistory, fetchHostSummary } = vi.hoisted(() => ({
   fetchLatestMetrics: vi.fn(),
   fetchMetricHistory: vi.fn(),
+  fetchHostSummary: vi.fn(),
 }));
 
 vi.mock("../api/client", async () => {
   const actual = await vi.importActual<typeof import("../api/client")>("../api/client");
-  return { ...actual, fetchLatestMetrics, fetchMetricHistory };
+  return { ...actual, fetchLatestMetrics, fetchMetricHistory, fetchHostSummary };
 });
 
 function renderHost(hostname: string) {
@@ -37,13 +50,16 @@ function renderHost(hostname: string) {
 
 beforeEach(() => {
   // Most tests only care about the tiles (fetchLatestMetrics); give the
-  // chart's fetch a harmless default so it doesn't hang those tests.
+  // chart's and summary's fetches a harmless default so they don't hang
+  // those tests.
   fetchMetricHistory.mockResolvedValue({ host: "web-1", name: "cpu.usage", start: 0, end: 0, series: [] });
+  fetchHostSummary.mockResolvedValue(summary());
 });
 
 afterEach(() => {
   fetchLatestMetrics.mockReset();
   fetchMetricHistory.mockReset();
+  fetchHostSummary.mockReset();
 });
 
 describe("HostPage", () => {
@@ -282,6 +298,49 @@ describe("HostPage", () => {
       await flush();
 
       expect(fetchLatestMetrics.mock.calls.length).toBe(tileCallsBefore);
+    });
+  });
+
+  describe("status badge", () => {
+    it("shows online with its last-seen time", async () => {
+      fetchLatestMetrics.mockResolvedValue([]);
+      fetchHostSummary.mockResolvedValue(summary({ status: "online", last_seen_at: Date.now() / 1000 }));
+
+      renderHost("web-1");
+
+      await waitFor(() => expect(screen.getByText("online")).toBeInTheDocument());
+      expect(screen.getByText("0s ago")).toBeInTheDocument();
+    });
+
+    it("shows offline", async () => {
+      fetchLatestMetrics.mockResolvedValue([]);
+      fetchHostSummary.mockResolvedValue(summary({ status: "offline" }));
+
+      renderHost("web-1");
+
+      await waitFor(() => expect(screen.getByText("offline")).toBeInTheDocument());
+    });
+
+    it("shows no badge at all if the summary fetch fails, rather than a second error message", async () => {
+      fetchLatestMetrics.mockResolvedValue([]);
+      fetchHostSummary.mockRejectedValue(new ApiError("boom", 503));
+
+      renderHost("web-1");
+
+      await waitFor(() => expect(screen.getByText("web-1")).toBeInTheDocument());
+      expect(screen.queryByText("online")).not.toBeInTheDocument();
+      expect(screen.queryByText("offline")).not.toBeInTheDocument();
+    });
+
+    it("shows no badge for an unknown host either", async () => {
+      fetchLatestMetrics.mockRejectedValue(new HostNotFoundError("nope"));
+      fetchHostSummary.mockRejectedValue(new HostNotFoundError("nope"));
+
+      renderHost("nope");
+
+      await waitFor(() => expect(screen.getByRole("alert")).toBeInTheDocument());
+      expect(screen.queryByText("online")).not.toBeInTheDocument();
+      expect(screen.queryByText("offline")).not.toBeInTheDocument();
     });
   });
 });

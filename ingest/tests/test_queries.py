@@ -113,6 +113,28 @@ def test_list_hosts_status_is_independent_per_host(store, db_url):
     assert statuses == {"web-1": "offline", "web-2": "online"}
 
 
+def test_get_host_summary_returns_none_for_an_unknown_host(store):
+    assert store.get_host_summary("nope") is None
+
+
+def test_get_host_summary_matches_the_hosts_entry_from_list_hosts(store):
+    store.write_batch(batch_dict("web-1", metric(name="cpu.usage", value=42.0)))
+    store.write_batch(batch_dict("web-2", metric(name="cpu.usage", value=90.0)))
+
+    summary = store.get_host_summary("web-1")
+
+    assert summary.hostname == "web-1"
+    assert summary.cpu_usage == 42.0
+
+
+def test_get_host_summary_respects_the_now_override_for_status(store):
+    store.write_batch(batch_dict("web-1", metric()))
+    (initial,) = store.list_hosts()
+
+    assert store.get_host_summary("web-1", now=initial.last_seen_at + 1).status == "online"
+    assert store.get_host_summary("web-1", now=initial.last_seen_at + STALE_AFTER_SECONDS).status == "offline"
+
+
 def test_list_hosts_includes_key_metrics_when_present(store):
     store.write_batch(batch_dict(
         "web-1",

@@ -1,13 +1,20 @@
 import { useEffect, useState } from "react";
 import { useParams } from "react-router-dom";
-import { ApiError, HostNotFoundError, fetchLatestMetrics, fetchMetricHistory } from "../api/client";
-import type { HistorySeries, LatestMetric } from "../api/types";
+import {
+  ApiError,
+  HostNotFoundError,
+  fetchHostSummary,
+  fetchLatestMetrics,
+  fetchMetricHistory,
+} from "../api/client";
+import type { HistorySeries, HostSummary, LatestMetric } from "../api/types";
 import { CpuTile } from "../components/CpuTile";
 import { DiskTile } from "../components/DiskTile";
 import { LineChart } from "../components/LineChart";
 import { MemoryTile } from "../components/MemoryTile";
 import { NetworkTile } from "../components/NetworkTile";
 import { TimeRangeSelector } from "../components/TimeRangeSelector";
+import { formatRelativeTime } from "../metrics/format";
 import { toChartSeries } from "../metrics/series";
 import { DEFAULT_TIME_RANGE, TIME_RANGES, type TimeRangeOption } from "../metrics/timeRanges";
 
@@ -22,12 +29,19 @@ type HistoryState =
   | { status: "loaded"; series: HistorySeries[] }
   | { status: "error"; message: string };
 
+// This is a supplementary status badge, not primary data -- the tiles above
+// already surface a real "unknown host"/error state, so any failure here
+// (not-found or otherwise) just hides the badge instead of showing a second,
+// redundant error message.
+type SummaryState = { status: "loading" } | { status: "loaded"; summary: HostSummary } | { status: "unavailable" };
+
 export const TILE_POLL_INTERVAL_MS = 5000;
 
 export function HostPage() {
   const { hostname } = useParams<{ hostname: string }>();
   const [latestState, setLatestState] = useState<LatestState>({ status: "loading" });
   const [historyState, setHistoryState] = useState<HistoryState>({ status: "loading" });
+  const [summaryState, setSummaryState] = useState<SummaryState>({ status: "loading" });
   const [timeRange, setTimeRange] = useState<TimeRangeOption>(DEFAULT_TIME_RANGE);
 
   useEffect(() => {
@@ -56,6 +70,30 @@ export function HostPage() {
           } else {
             setLatestState({ status: "error", message: "Could not reach the ingestion API." });
           }
+        });
+    };
+
+    poll();
+    const interval = setInterval(poll, TILE_POLL_INTERVAL_MS);
+
+    return () => {
+      cancelled = true;
+      clearInterval(interval);
+    };
+  }, [hostname]);
+
+  useEffect(() => {
+    if (!hostname) return;
+
+    let cancelled = false;
+
+    const poll = () => {
+      fetchHostSummary(hostname)
+        .then((summary) => {
+          if (!cancelled) setSummaryState({ status: "loaded", summary });
+        })
+        .catch(() => {
+          if (!cancelled) setSummaryState({ status: "unavailable" });
         });
     };
 
@@ -105,7 +143,20 @@ export function HostPage() {
 
   return (
     <section>
-      <h1>{hostname}</h1>
+      <div className="host-page-header">
+        <h1>{hostname}</h1>
+        {summaryState.status === "loaded" && (
+          <>
+            <span className={`fleet-status fleet-status--${summaryState.summary.status}`}>
+              <span className="fleet-status-dot" aria-hidden="true" />
+              {summaryState.summary.status}
+            </span>
+            <span className="page-status host-page-last-seen">
+              {formatRelativeTime(summaryState.summary.last_seen_at)}
+            </span>
+          </>
+        )}
+      </div>
       {latestState.status === "loading" && <p className="page-status">Loading...</p>}
       {latestState.status === "not-found" && (
         <p role="alert" className="page-status page-status--warning">

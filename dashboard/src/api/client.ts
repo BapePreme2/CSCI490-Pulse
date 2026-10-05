@@ -1,4 +1,11 @@
-import type { FleetHost, FleetHostsResponse, HistoryResponse, LatestMetric, LatestMetricsResponse } from "./types";
+import type {
+  FleetHost,
+  FleetHostsResponse,
+  HistoryResponse,
+  HostSummary,
+  LatestMetric,
+  LatestMetricsResponse,
+} from "./types";
 
 const DEFAULT_API_BASE_URL = "http://localhost:8000";
 
@@ -52,6 +59,10 @@ export async function fetchHosts(): Promise<FleetHost[]> {
   }
   const data = (await response.json()) as FleetHostsResponse;
   return data.hosts;
+}
+
+export async function fetchHostSummary(host: string): Promise<HostSummary> {
+  return getJson<HostSummary>(`/hosts/${encodeURIComponent(host)}`, host);
 }
 
 export async function fetchLatestMetrics(host: string): Promise<LatestMetric[]> {

@@ -16,7 +16,7 @@ from pulse_ingest import __version__
 from pulse_ingest.auth import extract_bearer_token, is_valid_key, load_api_keys
 from pulse_ingest.migrate import database_url
 from pulse_ingest.schemas import MetricBatch
-from pulse_ingest.store import PostgresMetricStore, Store
+from pulse_ingest.store import HostSummary, PostgresMetricStore, Store
 
 # uvicorn configures only its own loggers (uvicorn/uvicorn.access/uvicorn.error);
 # the root logger otherwise has no handler and a default level of WARNING, so
@@ -113,19 +113,17 @@ def create_app(
             summaries = store.list_hosts()
         except (psycopg.OperationalError, PoolTimeout):
             raise _database_unavailable()
-        return {
-            "hosts": [
-                {
-                    "hostname": h.hostname,
-                    "first_seen_at": h.first_seen_at,
-                    "last_seen_at": h.last_seen_at,
-                    "status": h.status,
-                    "cpu_usage": h.cpu_usage,
-                    "memory_percent": h.memory_percent,
-                }
-                for h in summaries
-            ]
-        }
+        return {"hosts": [_host_summary_dict(h) for h in summaries]}
+
+    @app.get("/hosts/{host}")
+    def host_summary(host: str) -> dict:
+        try:
+            summary = store.get_host_summary(host)
+        except (psycopg.OperationalError, PoolTimeout):
+            raise _database_unavailable()
+        if summary is None:
+            raise HTTPException(status.HTTP_404_NOT_FOUND, detail=f"Unknown host: {host}")
+        return _host_summary_dict(summary)
 
     @app.get("/hosts/{host}/metrics/latest")
     def latest_metrics(host: str) -> dict:
@@ -197,6 +195,17 @@ def create_app(
 def _database_unavailable() -> HTTPException:
     logger.exception("Database unavailable")
     return HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, detail="Database unavailable")
+
+
+def _host_summary_dict(h: HostSummary) -> dict:
+    return {
+        "hostname": h.hostname,
+        "first_seen_at": h.first_seen_at,
+        "last_seen_at": h.last_seen_at,
+        "status": h.status,
+        "cpu_usage": h.cpu_usage,
+        "memory_percent": h.memory_percent,
+    }
 
 
 app = create_app()

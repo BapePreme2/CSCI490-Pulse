@@ -68,6 +68,50 @@ def test_hosts_returns_503_when_database_is_unreachable(error):
     assert response.status_code == 503
 
 
+# --- GET /hosts/{host} ---
+
+
+def test_host_summary_returns_404_for_unknown_host():
+    response = client_for().get("/hosts/nope")
+
+    assert response.status_code == 404
+    assert "nope" in response.json()["detail"]
+
+
+def test_host_summary_returns_the_matching_host():
+    summaries = [
+        HostSummary("web-1", 100.0, 200.0, status="online", cpu_usage=12.5, memory_percent=50.0),
+        HostSummary("web-2", 90.0, 95.0, status="offline", cpu_usage=None, memory_percent=None),
+    ]
+
+    response = client_for(host_summaries=summaries).get("/hosts/web-2")
+
+    assert response.status_code == 200
+    assert response.json() == {
+        "hostname": "web-2",
+        "first_seen_at": 90.0,
+        "last_seen_at": 95.0,
+        "status": "offline",
+        "cpu_usage": None,
+        "memory_percent": None,
+    }
+
+
+def test_host_summary_does_not_require_an_api_key():
+    summaries = [HostSummary("web-1", 0.0, 0.0, status="online")]
+
+    response = client_for(host_summaries=summaries).get("/hosts/web-1", headers={})
+
+    assert response.status_code == 200
+
+
+@pytest.mark.parametrize("error", [psycopg.OperationalError("down"), PoolTimeout("timeout")])
+def test_host_summary_returns_503_when_database_is_unreachable(error):
+    response = client_for(error=error).get("/hosts/web-1")
+
+    assert response.status_code == 503
+
+
 # --- GET /hosts/{host}/metrics/latest ---
 
 

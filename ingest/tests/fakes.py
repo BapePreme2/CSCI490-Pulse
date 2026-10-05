@@ -35,6 +35,11 @@ class FakeStore:
             raise self.error
         return self._host_summaries
 
+    def get_host_summary(self, host, now=None):
+        if self.error:
+            raise self.error
+        return next((h for h in self._host_summaries if h.hostname == host), None)
+
     def get_latest(self, host):
         if self.error:
             raise self.error

@@ -163,6 +163,13 @@ running the real agent against the real API and noticing the fleet page
 showed dashes it shouldn't have. Fixed by checking for the absence of the
 `core` tag specifically (`NOT (v.tags ? 'core')`) instead of zero tags.
 
+**`GET /hosts/{host}`** -- one host's own summary, the same shape as one
+entry of `GET /hosts` above (hostname, first/last seen, `status`,
+`cpu_usage`, `memory_percent`). `404` if the host is unknown. Implemented
+as a thin filter over `list_hosts()` rather than a second copy of its
+query, so the two can't drift out of sync the way the bug above could have
+recurred if duplicated.
+
 **`GET /hosts/{host}/metrics/latest`** -- the most recent value of every
 series (metric + tags) the host has reported.
 
@@ -304,3 +311,4 @@ half-applied. To add one, create the next numbered file, e.g.
 | FLEET-02 host self-registration | `pulse_ingest/store.py` (`WriteResult.new_host`), `pulse_ingest/app.py`, `tests/test_store.py`, `tests/test_ingest.py`, `tests/fakes.py` |
 | FLEET-03 fleet overview endpoint | `pulse_ingest/store.py` (`list_hosts` key metrics), `pulse_ingest/app.py` (`GET /hosts`), `tests/test_queries.py`, `tests/test_dashboard_endpoints.py` |
 | FLEET-04 heartbeat/stale detection | `pulse_ingest/store.py` (`STALE_AFTER_SECONDS`, `HostSummary.status`), `tests/test_queries.py`, `tests/test_dashboard_endpoints.py` |
+| FLEET-05 per-host detail endpoint | `pulse_ingest/store.py` (`get_host_summary`), `pulse_ingest/app.py` (`GET /hosts/{host}`), `tests/test_queries.py`, `tests/test_dashboard_endpoints.py` |

@@ -8,6 +8,7 @@ import { App } from "./App";
 vi.mock("./api/client", () => ({
   fetchLatestMetrics: vi.fn().mockReturnValue(new Promise(() => {})),
   fetchMetricHistory: vi.fn().mockReturnValue(new Promise(() => {})),
+  fetchHostSummary: vi.fn().mockReturnValue(new Promise(() => {})),
   fetchHosts: vi.fn().mockReturnValue(new Promise(() => {})),
 }));
 

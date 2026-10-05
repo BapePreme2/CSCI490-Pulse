@@ -44,3 +44,7 @@ export interface FleetHost {
 export interface FleetHostsResponse {
   hosts: FleetHost[];
 }
+
+/** Same shape as one entry of GET /hosts; the semantic name for the
+ * single-host GET /hosts/{host} response. */
+export type HostSummary = FleetHost;

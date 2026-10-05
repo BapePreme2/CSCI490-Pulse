@@ -47,7 +47,11 @@ npm run build
   every `TILE_POLL_INTERVAL_MS` (5s) for live updates. Only the first load
   can show loading/not-found/error; once tiles have shown real data, a
   later poll that fails is skipped silently so the last good values stay
-  on screen instead of flickering to an error.
+  on screen instead of flickering to an error. The heading also polls
+  `GET /hosts/{host}` (`fetchHostSummary`) for the same online/offline
+  badge and last-seen time the fleet page shows; this one is purely
+  supplementary, so any failure (including unknown host) just hides the
+  badge instead of showing a second, redundant error message.
 - `src/api/client.ts` -- the API client. Reads `VITE_API_BASE_URL` (default
   `http://localhost:8000`); throws `HostNotFoundError` on a 404 and
   `ApiError` for anything else non-2xx or unreachable.
@@ -157,3 +161,4 @@ every line either.
 | --- | --- |
 | FLEET-03 fleet overview page | `src/routes/FleetOverviewPage.tsx`, `src/api/client.ts` (`fetchHosts`), `src/metrics/format.ts` (`formatRelativeTime`), `src/index.css` (`.fleet-table`) |
 | FLEET-04 online/offline status badge | `src/routes/FleetOverviewPage.tsx`, `src/api/types.ts` (`HostStatus`), `src/index.css` (`.fleet-status`) |
+| FLEET-05 per-host status on the detail page | `src/routes/HostPage.tsx`, `src/api/client.ts` (`fetchHostSummary`), `src/index.css` (`.host-page-header`) |

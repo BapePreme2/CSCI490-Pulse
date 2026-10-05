@@ -154,6 +154,9 @@ class QueryStore(Protocol):
         the real current time; overridable so online/offline is testable
         deterministically."""
 
+    def get_host_summary(self, host: str, now: float | None = None) -> HostSummary | None:
+        """One host's own summary, or None if unknown."""
+
     def get_latest(self, host: str) -> list[LatestMetric]:
         """The most recent value of every series (metric + tags) a host reports."""
 
@@ -228,6 +231,12 @@ class PostgresMetricStore:
             )
             for hostname, first, last, cpu, mem_used, mem_total in rows
         ]
+
+    def get_host_summary(self, host: str, now: float | None = None) -> HostSummary | None:
+        # Reuses list_hosts() rather than a second copy of its query, so the
+        # same key-metric tag-matching logic can't drift out of sync between
+        # the two (a bug already hit once in the fleet-wide version).
+        return next((h for h in self.list_hosts(now) if h.hostname == host), None)
 
     def get_latest(self, host: str) -> list[LatestMetric]:
         with self._pool.connection() as conn:
