@@ -107,6 +107,25 @@ def create_app(
             logger.info("New host registered: %s", batch.host)
         return {"accepted": len(batch.metrics), "stored": result.stored, "new_host": result.new_host}
 
+    @app.get("/hosts")
+    def hosts() -> dict:
+        try:
+            summaries = store.list_hosts()
+        except (psycopg.OperationalError, PoolTimeout):
+            raise _database_unavailable()
+        return {
+            "hosts": [
+                {
+                    "hostname": h.hostname,
+                    "first_seen_at": h.first_seen_at,
+                    "last_seen_at": h.last_seen_at,
+                    "cpu_usage": h.cpu_usage,
+                    "memory_percent": h.memory_percent,
+                }
+                for h in summaries
+            ]
+        }
+
     @app.get("/hosts/{host}/metrics/latest")
     def latest_metrics(host: str) -> dict:
         try:

@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { formatMb, formatMbps, formatPercent } from "./format";
+import { formatMb, formatMbps, formatPercent, formatRelativeTime } from "./format";
 
 describe("formatPercent", () => {
   it("rounds to one decimal place", () => {
@@ -20,5 +20,29 @@ describe("formatMb", () => {
 describe("formatMbps", () => {
   it("shows two decimal places", () => {
     expect(formatMbps(1.23456)).toBe("1.23 MB/s");
+  });
+});
+
+describe("formatRelativeTime", () => {
+  const now = 1_000_000;
+
+  it("shows seconds under a minute", () => {
+    expect(formatRelativeTime(now - 5, now)).toBe("5s ago");
+  });
+
+  it("shows minutes under an hour", () => {
+    expect(formatRelativeTime(now - 125, now)).toBe("2m ago");
+  });
+
+  it("shows hours under a day", () => {
+    expect(formatRelativeTime(now - 2 * 3600 - 1, now)).toBe("2h ago");
+  });
+
+  it("shows days at or beyond a day", () => {
+    expect(formatRelativeTime(now - 2 * 86400, now)).toBe("2d ago");
+  });
+
+  it("never shows negative time for a timestamp slightly in the future (clock skew)", () => {
+    expect(formatRelativeTime(now + 5, now)).toBe("0s ago");
   });
 });

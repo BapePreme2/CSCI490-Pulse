@@ -64,6 +64,56 @@ def test_list_hosts_reports_first_and_last_seen(store):
     assert host.first_seen_at == pytest.approx(host.last_seen_at, abs=1.0)
 
 
+def test_list_hosts_includes_key_metrics_when_present(store):
+    store.write_batch(batch_dict(
+        "web-1",
+        metric(name="cpu.usage", value=42.0),
+        metric(name="memory.used", unit="MB", value=512.0),
+        metric(name="memory.total", unit="MB", value=2048.0),
+    ))
+
+    (host,) = store.list_hosts()
+
+    assert host.cpu_usage == 42.0
+    assert host.memory_percent == pytest.approx(25.0)
+
+
+def test_list_hosts_key_metrics_are_none_for_a_host_with_no_data_yet(store):
+    store.write_batch(batch_dict("web-1", metric(name="load.avg")))  # no cpu.usage/memory.*
+
+    (host,) = store.list_hosts()
+
+    assert host.cpu_usage is None
+    assert host.memory_percent is None
+
+
+def test_list_hosts_ignores_tagged_readings_for_key_metrics(store):
+    # A per-core cpu.usage reading should not be mistaken for the overall one.
+    store.write_batch(batch_dict("web-1", metric(name="cpu.usage", core="0", value=99.0)))
+
+    (host,) = store.list_hosts()
+
+    assert host.cpu_usage is None
+
+
+def test_list_hosts_key_metrics_use_the_latest_sample(store):
+    store.write_batch(batch_dict("web-1", metric(name="cpu.usage", value=10.0, ts=TS)))
+    store.write_batch(batch_dict("web-1", metric(name="cpu.usage", value=20.0, ts=TS + 10)))
+
+    (host,) = store.list_hosts()
+
+    assert host.cpu_usage == 20.0
+
+
+def test_list_hosts_key_metrics_are_independent_per_host(store):
+    store.write_batch(batch_dict("web-1", metric(name="cpu.usage", value=10.0)))
+    store.write_batch(batch_dict("web-2", metric(name="cpu.usage", value=90.0)))
+
+    by_host = {h.hostname: h.cpu_usage for h in store.list_hosts()}
+
+    assert by_host == {"web-1": 10.0, "web-2": 90.0}
+
+
 def test_list_hosts_orders_most_recently_active_first(store):
     store.write_batch(batch_dict("web-1", metric()))
     store.write_batch(batch_dict("web-2", metric()))

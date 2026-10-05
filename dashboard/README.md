@@ -35,8 +35,12 @@ npm run build
   single host's page).
 - `src/layout/AppShell.tsx` -- shared header + content area every route
   renders inside.
-- `src/routes/FleetOverviewPage.tsx` -- placeholder; the real fleet list is
-  built in Week 6 (FLEET-03).
+- `src/routes/FleetOverviewPage.tsx` -- every known host from `GET /hosts`,
+  as a table (hostname linking to its page, last-seen, CPU, memory), with
+  the same live-polling (`FLEET_POLL_INTERVAL_MS`, 5s) and
+  first-load-only-error pattern as `HostPage`. A dash shown for a host's
+  CPU/memory means no data yet, not zero -- it does not mean the host is
+  offline; that determination is Week 6's FLEET-04, not this page.
 - `src/routes/HostPage.tsx` -- the single-host overview: fetches
   `GET /hosts/{host}/metrics/latest` and renders it as tiles, re-polling
   every `TILE_POLL_INTERVAL_MS` (5s) for live updates. Only the first load
@@ -145,3 +149,9 @@ every line either.
 | DASH-06 live-polling tiles | `src/routes/HostPage.tsx` (`TILE_POLL_INTERVAL_MS`) |
 | DASH-07 time-range selector | `src/components/TimeRangeSelector.tsx`, `src/metrics/timeRanges.ts`, wired into `src/routes/HostPage.tsx` |
 | DASH-08 style pass + responsive layout | `src/index.css`, `src/routes/HostPage.tsx` (`page-status` classes) |
+
+## Task mapping (Week 6)
+
+| Task | File(s) |
+| --- | --- |
+| FLEET-03 fleet overview page | `src/routes/FleetOverviewPage.tsx`, `src/api/client.ts` (`fetchHosts`), `src/metrics/format.ts` (`formatRelativeTime`), `src/index.css` (`.fleet-table`) |

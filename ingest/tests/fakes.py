@@ -4,12 +4,18 @@ from pulse_ingest.store import WriteResult
 class FakeStore:
     """In-memory MetricStore/QueryStore for API tests that don't need Postgres."""
 
-    def __init__(self, error: Exception | None = None, hosts: dict | None = None):
+    def __init__(
+        self,
+        error: Exception | None = None,
+        hosts: dict | None = None,
+        host_summaries: list | None = None,
+    ):
         self.batches = []
         self.error = error
         # host -> {"latest": [LatestMetric, ...], "history": {name: [HistorySeries, ...]}}
         self._hosts = hosts or {}
         self._written_hosts: set[str] = set()
+        self._host_summaries = host_summaries if host_summaries is not None else []
 
     def write_batch(self, batch):
         if self.error:
@@ -23,6 +29,11 @@ class FakeStore:
         if self.error:
             raise self.error
         return host in self._hosts
+
+    def list_hosts(self):
+        if self.error:
+            raise self.error
+        return self._host_summaries
 
     def get_latest(self, host):
         if self.error:

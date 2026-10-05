@@ -4,12 +4,66 @@ from fastapi.testclient import TestClient
 from psycopg_pool import PoolTimeout
 
 from pulse_ingest.app import create_app
-from pulse_ingest.store import HistoryPoint, HistorySeries, LatestMetric
+from pulse_ingest.store import HistoryPoint, HistorySeries, HostSummary, LatestMetric
 from tests.fakes import FakeStore
 
 
-def client_for(hosts=None, error=None):
-    return TestClient(create_app(api_keys={"k"}, store=FakeStore(hosts=hosts, error=error)))
+def client_for(hosts=None, error=None, host_summaries=None):
+    return TestClient(
+        create_app(api_keys={"k"}, store=FakeStore(hosts=hosts, error=error, host_summaries=host_summaries))
+    )
+
+
+# --- GET /hosts ---
+
+
+def test_hosts_is_empty_when_none_have_reported():
+    response = client_for().get("/hosts")
+
+    assert response.status_code == 200
+    assert response.json() == {"hosts": []}
+
+
+def test_hosts_lists_each_host_with_its_key_metrics():
+    summaries = [
+        HostSummary("web-1", 100.0, 200.0, cpu_usage=12.5, memory_percent=50.0),
+        HostSummary("web-2", 90.0, 95.0, cpu_usage=None, memory_percent=None),
+    ]
+
+    response = client_for(host_summaries=summaries).get("/hosts")
+
+    assert response.status_code == 200
+    assert response.json() == {
+        "hosts": [
+            {
+                "hostname": "web-1",
+                "first_seen_at": 100.0,
+                "last_seen_at": 200.0,
+                "cpu_usage": 12.5,
+                "memory_percent": 50.0,
+            },
+            {
+                "hostname": "web-2",
+                "first_seen_at": 90.0,
+                "last_seen_at": 95.0,
+                "cpu_usage": None,
+                "memory_percent": None,
+            },
+        ]
+    }
+
+
+def test_hosts_does_not_require_an_api_key():
+    response = client_for().get("/hosts", headers={})
+
+    assert response.status_code == 200
+
+
+@pytest.mark.parametrize("error", [psycopg.OperationalError("down"), PoolTimeout("timeout")])
+def test_hosts_returns_503_when_database_is_unreachable(error):
+    response = client_for(error=error).get("/hosts")
+
+    assert response.status_code == 503
 
 
 # --- GET /hosts/{host}/metrics/latest ---

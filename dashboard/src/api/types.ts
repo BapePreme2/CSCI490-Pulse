@@ -29,3 +29,15 @@ export interface HistoryResponse {
   end: number;
   series: HistorySeries[];
 }
+
+export interface FleetHost {
+  hostname: string;
+  first_seen_at: number;
+  last_seen_at: number;
+  cpu_usage: number | null;
+  memory_percent: number | null;
+}
+
+export interface FleetHostsResponse {
+  hosts: FleetHost[];
+}

@@ -122,8 +122,24 @@ Responses:
 
 ## Read endpoints (for the dashboard)
 
-Neither endpoint requires an API key, since the dashboard is a trusted
-internal client reading its own database, not an agent.
+None of these endpoints require an API key, since the dashboard is a
+trusted internal client reading its own database, not an agent.
+
+**`GET /hosts`** -- every known host for the fleet overview page, with two
+"key metrics" computed in a single query (not one per host): the overall
+(untagged) `cpu.usage` and a `memory_percent` derived from
+`memory.used`/`memory.total`. Either is `null` if that host has no such
+data yet. This is identity/status only -- it does not say whether a host
+is online or offline; that determination is FLEET-04.
+
+```json
+{
+  "hosts": [
+    {"hostname": "web-1", "first_seen_at": 1789415000.0, "last_seen_at": 1789419042.0,
+     "cpu_usage": 42.5, "memory_percent": 61.2}
+  ]
+}
+```
 
 **`GET /hosts/{host}/metrics/latest`** -- the most recent value of every
 series (metric + tags) the host has reported.
@@ -264,3 +280,4 @@ half-applied. To add one, create the next numbered file, e.g.
 | --- | --- |
 | FLEET-01 index/query cleanly across many hosts | `migrations/002_index_hosts_last_seen.sql`, `pulse_ingest/store.py` (`list_hosts`), `tests/test_queries.py`, `tests/test_migrate.py` |
 | FLEET-02 host self-registration | `pulse_ingest/store.py` (`WriteResult.new_host`), `pulse_ingest/app.py`, `tests/test_store.py`, `tests/test_ingest.py`, `tests/fakes.py` |
+| FLEET-03 fleet overview endpoint | `pulse_ingest/store.py` (`list_hosts` key metrics), `pulse_ingest/app.py` (`GET /hosts`), `tests/test_queries.py`, `tests/test_dashboard_endpoints.py` |

@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { ApiError, HostNotFoundError, fetchLatestMetrics, fetchMetricHistory } from "./client";
+import { ApiError, HostNotFoundError, fetchHosts, fetchLatestMetrics, fetchMetricHistory } from "./client";
 
 afterEach(() => {
   vi.unstubAllGlobals();
@@ -99,5 +99,43 @@ describe("fetchMetricHistory", () => {
     mockFetch({ ok: false, status: 400 });
 
     await expect(fetchMetricHistory("web-1", "cpu.usage")).rejects.toThrow(ApiError);
+  });
+});
+
+describe("fetchHosts", () => {
+  it("returns the hosts array on success", async () => {
+    mockFetch({
+      json: async () => ({
+        hosts: [
+          { hostname: "web-1", first_seen_at: 1, last_seen_at: 2, cpu_usage: 10, memory_percent: 50 },
+        ],
+      }),
+    });
+
+    const hosts = await fetchHosts();
+
+    expect(hosts).toEqual([
+      { hostname: "web-1", first_seen_at: 1, last_seen_at: 2, cpu_usage: 10, memory_percent: 50 },
+    ]);
+  });
+
+  it("requests /hosts", async () => {
+    const fetchMock = mockFetch({ json: async () => ({ hosts: [] }) });
+
+    await fetchHosts();
+
+    expect(fetchMock).toHaveBeenCalledWith("http://localhost:8000/hosts");
+  });
+
+  it("throws ApiError on a non-2xx status (no per-host 404 case exists here)", async () => {
+    mockFetch({ ok: false, status: 503 });
+
+    await expect(fetchHosts()).rejects.toThrow(ApiError);
+  });
+
+  it("throws ApiError when the network request itself fails", async () => {
+    vi.stubGlobal("fetch", vi.fn().mockRejectedValue(new TypeError("network down")));
+
+    await expect(fetchHosts()).rejects.toThrow(ApiError);
   });
 });

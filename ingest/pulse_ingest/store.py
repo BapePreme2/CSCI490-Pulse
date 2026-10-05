@@ -34,10 +34,31 @@ ON CONFLICT DO NOTHING
 
 _HOST_EXISTS = "SELECT 1 FROM hosts WHERE hostname = %s"
 
+# The "key metrics" a fleet overview shows at a glance: each host's overall
+# (untagged) cpu.usage and memory.used/memory.total, each as a single
+# DISTINCT ON per (host, metric) rather than one query per host. LEFT JOINed
+# onto every host so one with no data yet still appears, with nulls.
 _LIST_HOSTS = """
-SELECT hostname, extract(epoch FROM first_seen_at), extract(epoch FROM last_seen_at)
-FROM hosts
-ORDER BY last_seen_at DESC
+WITH key_metrics AS (
+    SELECT DISTINCT ON (v.host_id, m.name)
+        v.host_id, m.name, v.value
+    FROM metric_values v
+    JOIN metrics m ON m.id = v.metric_id
+    WHERE m.name IN ('cpu.usage', 'memory.used', 'memory.total') AND v.tags = '{}'::jsonb
+    ORDER BY v.host_id, m.name, v.ts DESC
+)
+SELECT
+    h.hostname,
+    extract(epoch FROM h.first_seen_at),
+    extract(epoch FROM h.last_seen_at),
+    cpu.value,
+    mem_used.value,
+    mem_total.value
+FROM hosts h
+LEFT JOIN key_metrics cpu ON cpu.host_id = h.id AND cpu.name = 'cpu.usage'
+LEFT JOIN key_metrics mem_used ON mem_used.host_id = h.id AND mem_used.name = 'memory.used'
+LEFT JOIN key_metrics mem_total ON mem_total.host_id = h.id AND mem_total.name = 'memory.total'
+ORDER BY h.last_seen_at DESC, h.hostname
 """
 
 # One row per currently-reporting series: DISTINCT ON picks the latest ts
@@ -84,6 +105,8 @@ class HostSummary:
     hostname: str
     first_seen_at: float
     last_seen_at: float
+    cpu_usage: float | None = None
+    memory_percent: float | None = None
 
 
 @dataclass(frozen=True)
@@ -173,8 +196,14 @@ class PostgresMetricStore:
         with self._pool.connection() as conn:
             rows = conn.execute(_LIST_HOSTS).fetchall()
         return [
-            HostSummary(hostname=hostname, first_seen_at=float(first), last_seen_at=float(last))
-            for hostname, first, last in rows
+            HostSummary(
+                hostname=hostname,
+                first_seen_at=float(first),
+                last_seen_at=float(last),
+                cpu_usage=cpu,
+                memory_percent=(mem_used / mem_total * 100) if mem_used is not None and mem_total else None,
+            )
+            for hostname, first, last, cpu, mem_used, mem_total in rows
         ]
 
     def get_latest(self, host: str) -> list[LatestMetric]:
