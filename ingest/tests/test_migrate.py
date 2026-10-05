@@ -9,7 +9,8 @@ pytestmark = pytest.mark.integration
 def test_migrations_create_expected_tables(scratch_db_url):
     applied = apply_migrations(scratch_db_url)
 
-    assert applied == ["001_initial_schema"]
+    assert applied == sorted(applied)
+    assert "001_initial_schema" in applied
     with psycopg.connect(scratch_db_url) as conn:
         tables = {
             r[0]
@@ -18,6 +19,16 @@ def test_migrations_create_expected_tables(scratch_db_url):
             )
         }
     assert {"hosts", "metrics", "metric_values", "schema_migrations"} <= tables
+
+
+def test_migrations_create_the_hosts_last_seen_index(scratch_db_url):
+    apply_migrations(scratch_db_url)
+
+    with psycopg.connect(scratch_db_url) as conn:
+        indexes = {
+            r[0] for r in conn.execute("SELECT indexname FROM pg_indexes WHERE tablename = 'hosts'")
+        }
+    assert "hosts_last_seen_at_idx" in indexes
 
 
 def test_migrations_are_idempotent(scratch_db_url):

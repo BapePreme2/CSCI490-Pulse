@@ -42,6 +42,38 @@ def test_host_exists_becomes_true_after_a_write(store):
     assert store.host_exists("web-2") is False
 
 
+def test_list_hosts_is_empty_initially(store):
+    assert store.list_hosts() == []
+
+
+def test_list_hosts_returns_every_known_host(store):
+    store.write_batch(batch_dict("web-1", metric()))
+    store.write_batch(batch_dict("web-2", metric()))
+
+    hostnames = {h.hostname for h in store.list_hosts()}
+
+    assert hostnames == {"web-1", "web-2"}
+
+
+def test_list_hosts_reports_first_and_last_seen(store):
+    store.write_batch(batch_dict("web-1", metric()))
+
+    (host,) = store.list_hosts()
+
+    assert host.hostname == "web-1"
+    assert host.first_seen_at == pytest.approx(host.last_seen_at, abs=1.0)
+
+
+def test_list_hosts_orders_most_recently_active_first(store):
+    store.write_batch(batch_dict("web-1", metric()))
+    store.write_batch(batch_dict("web-2", metric()))
+    store.write_batch(batch_dict("web-1", metric(ts=TS + 10)))  # web-1 reports again, latest now
+
+    hostnames = [h.hostname for h in store.list_hosts()]
+
+    assert hostnames == ["web-1", "web-2"]
+
+
 def test_get_latest_returns_one_row_per_series(store):
     store.write_batch(batch_dict(
         "web-1",

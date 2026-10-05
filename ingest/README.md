@@ -200,7 +200,14 @@ starting the API.
 `(host_id, metric_id, ts, tags)` is both the query index (host + metric +
 time range) and a dedupe guard, so a batch the agent retries after a lost
 response can be written with `ON CONFLICT DO NOTHING` without duplicating
-data.
+data. That index already leads with `host_id`, so per-host sample queries
+scale fine as hosts are added without any extra index.
+
+`migrations/002_index_hosts_last_seen.sql` adds `hosts_last_seen_at_idx`
+on `hosts (last_seen_at DESC)`, the one genuinely new access pattern
+multi-host support introduces: listing hosts most-recently-active first
+(`list_hosts()`, Week 6) and detecting stale/offline hosts by
+`last_seen_at` (FLEET-04, later in Week 6).
 
 ## Migrations
 
@@ -229,3 +236,9 @@ half-applied. To add one, create the next numbered file, e.g.
 | --- | --- |
 | DASH-02 latest-values endpoint | `pulse_ingest/store.py` (`get_latest`), `pulse_ingest/app.py`, `tests/test_queries.py`, `tests/test_dashboard_endpoints.py` |
 | DASH-03 historical-values endpoint | `pulse_ingest/store.py` (`get_history`), `pulse_ingest/app.py`, `tests/test_queries.py`, `tests/test_dashboard_endpoints.py` |
+
+## Task mapping (Week 6)
+
+| Task | File(s) |
+| --- | --- |
+| FLEET-01 index/query cleanly across many hosts | `migrations/002_index_hosts_last_seen.sql`, `pulse_ingest/store.py` (`list_hosts`), `tests/test_queries.py`, `tests/test_migrate.py` |

@@ -31,6 +31,12 @@ ON CONFLICT DO NOTHING
 
 _HOST_EXISTS = "SELECT 1 FROM hosts WHERE hostname = %s"
 
+_LIST_HOSTS = """
+SELECT hostname, extract(epoch FROM first_seen_at), extract(epoch FROM last_seen_at)
+FROM hosts
+ORDER BY last_seen_at DESC
+"""
+
 # One row per currently-reporting series: DISTINCT ON picks the latest ts
 # within each (metric_id, tags) group, which is why the ORDER BY must lead
 # with those same two columns.
@@ -70,6 +76,13 @@ class LatestMetric:
 
 
 @dataclass(frozen=True)
+class HostSummary:
+    hostname: str
+    first_seen_at: float
+    last_seen_at: float
+
+
+@dataclass(frozen=True)
 class HistoryPoint:
     timestamp: float
     value: float
@@ -89,6 +102,9 @@ class MetricStore(Protocol):
 
 class QueryStore(Protocol):
     def host_exists(self, host: str) -> bool: ...
+
+    def list_hosts(self) -> list[HostSummary]:
+        """Every known host, most recently active first."""
 
     def get_latest(self, host: str) -> list[LatestMetric]:
         """The most recent value of every series (metric + tags) a host reports."""
@@ -148,6 +164,14 @@ class PostgresMetricStore:
     def host_exists(self, host: str) -> bool:
         with self._pool.connection() as conn:
             return conn.execute(_HOST_EXISTS, (host,)).fetchone() is not None
+
+    def list_hosts(self) -> list[HostSummary]:
+        with self._pool.connection() as conn:
+            rows = conn.execute(_LIST_HOSTS).fetchall()
+        return [
+            HostSummary(hostname=hostname, first_seen_at=float(first), last_seen_at=float(last))
+            for hostname, first, last in rows
+        ]
 
     def get_latest(self, host: str) -> list[LatestMetric]:
         with self._pool.connection() as conn:
