@@ -186,6 +186,27 @@ it, that tag is dropped before storing. Connections come from a pool
 (`psycopg_pool`) that the app opens on startup. Run the migrations before
 starting the API.
 
+## Host self-registration
+
+A host needs no separate setup step: its first-ever `POST /metrics` creates
+its `hosts` row (step 1 of the write path above). Whether that write was a
+brand-new host or an existing one checking in again is detected with the
+standard Postgres `xmax = 0` idiom on the upsert's `RETURNING` clause --
+`xmax` is left at 0 for a row the command just inserted, and set to the
+current transaction for one the `ON CONFLICT DO UPDATE` branch touched
+instead.
+
+That result is surfaced two ways: the response gains a `new_host` field
+(`202 {"accepted": N, "stored": M, "new_host": true|false}`), and the
+server logs `New host registered: <hostname>` at INFO level the first
+time. That log line needs the app to actually configure a logging handler
+-- a plain `uvicorn module:app` entrypoint has no `__main__` of its own to
+do that, and without it every `logger.info()` call in this app is silently
+dropped (the root logger's default level is WARNING with no handler at
+all). `pulse_ingest/app.py` calls `logging.basicConfig()` at import time to
+fix that; it's a no-op if something else already configured the root
+logger.
+
 ## Database schema
 
 `migrations/001_initial_schema.sql`:
@@ -242,3 +263,4 @@ half-applied. To add one, create the next numbered file, e.g.
 | Task | File(s) |
 | --- | --- |
 | FLEET-01 index/query cleanly across many hosts | `migrations/002_index_hosts_last_seen.sql`, `pulse_ingest/store.py` (`list_hosts`), `tests/test_queries.py`, `tests/test_migrate.py` |
+| FLEET-02 host self-registration | `pulse_ingest/store.py` (`WriteResult.new_host`), `pulse_ingest/app.py`, `tests/test_store.py`, `tests/test_ingest.py`, `tests/fakes.py` |

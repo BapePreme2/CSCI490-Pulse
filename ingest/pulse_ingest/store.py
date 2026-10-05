@@ -9,10 +9,13 @@ from psycopg_pool import ConnectionPool
 
 from pulse_ingest.schemas import MetricBatch
 
+# xmax = 0 is the standard Postgres idiom for "this row was just inserted,
+# not touched by the ON CONFLICT update branch" within the same command --
+# that's how a host's first-ever contact (self-registration) is detected.
 _UPSERT_HOST = """
 INSERT INTO hosts (hostname) VALUES (%s)
 ON CONFLICT (hostname) DO UPDATE SET last_seen_at = now()
-RETURNING id
+RETURNING id, (xmax = 0) AS is_new
 """
 
 # The no-op DO UPDATE makes RETURNING yield rows that already existed too.
@@ -64,6 +67,7 @@ ORDER BY m.unit, v.tags, v.ts
 @dataclass(frozen=True)
 class WriteResult:
     stored: int
+    new_host: bool = False
 
 
 @dataclass(frozen=True)
@@ -141,7 +145,7 @@ class PostgresMetricStore:
         pairs = sorted({(m.name, m.unit) for m in batch.metrics})
 
         with self._pool.connection() as conn, conn.cursor() as cur:
-            host_id = cur.execute(_UPSERT_HOST, (batch.host,)).fetchone()[0]
+            host_id, is_new_host = cur.execute(_UPSERT_HOST, (batch.host,)).fetchone()
 
             cur.execute(_UPSERT_METRICS, ([p[0] for p in pairs], [p[1] for p in pairs]))
             metric_ids = {(name, unit): metric_id for metric_id, name, unit in cur.fetchall()}
@@ -159,7 +163,7 @@ class PostgresMetricStore:
                 for m in batch.metrics
             ]
             cur.executemany(_INSERT_VALUE, rows)
-            return WriteResult(stored=cur.rowcount)
+            return WriteResult(stored=cur.rowcount, new_host=is_new_host)
 
     def host_exists(self, host: str) -> bool:
         with self._pool.connection() as conn:

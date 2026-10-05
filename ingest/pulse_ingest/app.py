@@ -18,6 +18,13 @@ from pulse_ingest.migrate import database_url
 from pulse_ingest.schemas import MetricBatch
 from pulse_ingest.store import PostgresMetricStore, Store
 
+# uvicorn configures only its own loggers (uvicorn/uvicorn.access/uvicorn.error);
+# the root logger otherwise has no handler and a default level of WARNING, so
+# this app's own INFO-level logs (e.g. new-host registration) would be silently
+# dropped under a plain `uvicorn pulse_ingest.app:app` without this. A no-op if
+# something else already configured the root logger's handlers.
+logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
+
 logger = logging.getLogger(__name__)
 
 AGENT_PATHS = {"/metrics"}
@@ -88,7 +95,7 @@ def create_app(
         return {"status": "ok", "version": __version__}
 
     @app.post("/metrics", status_code=status.HTTP_202_ACCEPTED)
-    def ingest_metrics(batch: MetricBatch) -> dict[str, int]:
+    def ingest_metrics(batch: MetricBatch) -> dict[str, int | bool]:
         try:
             result = store.write_batch(batch)
         except (psycopg.OperationalError, PoolTimeout):
@@ -96,7 +103,9 @@ def create_app(
             raise HTTPException(
                 status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail="Database unavailable"
             )
-        return {"accepted": len(batch.metrics), "stored": result.stored}
+        if result.new_host:
+            logger.info("New host registered: %s", batch.host)
+        return {"accepted": len(batch.metrics), "stored": result.stored, "new_host": result.new_host}
 
     @app.get("/hosts/{host}/metrics/latest")
     def latest_metrics(host: str) -> dict:

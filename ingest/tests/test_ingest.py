@@ -37,7 +37,7 @@ def test_valid_batch_is_accepted(client):
     response = client.post("/metrics", json=body)
 
     assert response.status_code == 202
-    assert response.json() == {"accepted": 2, "stored": 2}
+    assert response.json() == {"accepted": 2, "stored": 2, "new_host": True}
 
 
 def test_missing_host_is_rejected_with_field_location(client):
@@ -112,3 +112,56 @@ def test_database_outage_is_503_so_agents_retry(error):
 
     assert response.status_code == 503
     assert response.json() == {"detail": "Database unavailable"}
+
+
+def test_first_batch_from_a_host_reports_new_host_true():
+    client = build_client(FakeStore())
+
+    response = client.post("/metrics", json={"host": "new-host", "metrics": [metric()]})
+
+    assert response.json()["new_host"] is True
+
+
+def test_second_batch_from_the_same_host_reports_new_host_false():
+    client = build_client(FakeStore())
+    body = {"host": "web-1", "metrics": [metric()]}
+
+    client.post("/metrics", json=body)
+    response = client.post("/metrics", json=body)
+
+    assert response.json()["new_host"] is False
+
+
+def test_different_hosts_are_each_new_once():
+    client = build_client(FakeStore())
+
+    first = client.post("/metrics", json={"host": "web-1", "metrics": [metric()]})
+    second = client.post("/metrics", json={"host": "web-2", "metrics": [metric()]})
+
+    assert first.json()["new_host"] is True
+    assert second.json()["new_host"] is True
+
+
+def test_new_host_registration_is_actually_logged(caplog):
+    # A regression guard: logger.info() calls are silently dropped unless
+    # the root logger has a handler configured, which is easy to get wrong
+    # for a plain `uvicorn module:app` entrypoint with no __main__ of its own.
+    client = build_client(FakeStore())
+
+    with caplog.at_level("INFO"):
+        client.post("/metrics", json={"host": "brand-new", "metrics": [metric()]})
+
+    assert "brand-new" in caplog.text
+    assert "registered" in caplog.text.lower()
+
+
+def test_repeat_host_is_not_logged_as_newly_registered(caplog):
+    client = build_client(FakeStore())
+    body = {"host": "web-1", "metrics": [metric()]}
+    client.post("/metrics", json=body)
+
+    with caplog.at_level("INFO"):
+        caplog.clear()
+        client.post("/metrics", json=body)
+
+    assert "registered" not in caplog.text.lower()

@@ -52,6 +52,29 @@ def test_write_creates_host_metrics_and_samples(store, db_url):
     assert query(db_url, "SELECT count(*) FROM metric_values") == [(3,)]
 
 
+def test_a_hosts_first_ever_batch_self_registers_it(store, db_url):
+    result = store.write_batch(batch(metric()))
+
+    assert result.new_host is True
+    assert query(db_url, "SELECT hostname FROM hosts") == [("web-1",)]
+
+
+def test_a_known_hosts_later_batch_is_not_reported_as_new(store):
+    store.write_batch(batch(metric(ts=TS)))
+
+    result = store.write_batch(batch(metric(ts=TS + 10)))
+
+    assert result.new_host is False
+
+
+def test_each_distinct_host_self_registers_once(store):
+    first = store.write_batch(batch(metric(), host="web-1"))
+    second = store.write_batch(batch(metric(), host="web-2"))
+    third = store.write_batch(batch(metric(ts=TS + 10), host="web-1"))
+
+    assert (first.new_host, second.new_host, third.new_host) == (True, True, False)
+
+
 def test_samples_are_linked_to_the_right_host_and_metric(store, db_url):
     store.write_batch(batch(metric(value=42.5, core="0")))
 
