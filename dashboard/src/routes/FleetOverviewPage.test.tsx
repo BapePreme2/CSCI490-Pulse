@@ -10,6 +10,7 @@ function host(overrides: Partial<FleetHost> = {}): FleetHost {
     hostname: "web-1",
     first_seen_at: 0,
     last_seen_at: 0,
+    status: "online",
     cpu_usage: null,
     memory_percent: null,
     ...overrides,
@@ -79,6 +80,18 @@ describe("FleetOverviewPage", () => {
     renderFleet();
 
     await waitFor(() => expect(screen.getAllByText("–")).toHaveLength(2));
+  });
+
+  it("shows each host's online/offline status", async () => {
+    fetchHosts.mockResolvedValue([
+      host({ hostname: "web-1", status: "online" }),
+      host({ hostname: "web-2", status: "offline" }),
+    ]);
+
+    renderFleet();
+
+    await waitFor(() => expect(screen.getByText("online")).toBeInTheDocument());
+    expect(screen.getByText("offline")).toBeInTheDocument();
   });
 
   it("shows the API's error message when the request fails", async () => {

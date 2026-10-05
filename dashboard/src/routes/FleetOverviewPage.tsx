@@ -64,6 +64,7 @@ export function FleetOverviewPage() {
           <thead>
             <tr>
               <th>Host</th>
+              <th>Status</th>
               <th>Last seen</th>
               <th>CPU</th>
               <th>Memory</th>
@@ -74,6 +75,12 @@ export function FleetOverviewPage() {
               <tr key={host.hostname}>
                 <td>
                   <Link to={`/hosts/${encodeURIComponent(host.hostname)}`}>{host.hostname}</Link>
+                </td>
+                <td>
+                  <span className={`fleet-status fleet-status--${host.status}`}>
+                    <span className="fleet-status-dot" aria-hidden="true" />
+                    {host.status}
+                  </span>
                 </td>
                 <td>{formatRelativeTime(host.last_seen_at)}</td>
                 <td>{host.cpu_usage === null ? "–" : formatPercent(host.cpu_usage)}</td>

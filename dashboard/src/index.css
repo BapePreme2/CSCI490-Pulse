@@ -9,6 +9,7 @@
   --color-accent-contrast: #ffffff;
   --color-warning: #b45309;
   --color-danger: #dc2626;
+  --color-online: #16a34a;
   --shadow-tile: 0 1px 2px rgba(15, 23, 42, 0.06), 0 1px 1px rgba(15, 23, 42, 0.04);
 
   --space-1: 4px;
@@ -38,6 +39,7 @@
     --color-accent-contrast: #0b1220;
     --color-warning: #fbbf24;
     --color-danger: #f87171;
+    --color-online: #4ade80;
     --shadow-tile: 0 1px 2px rgba(0, 0, 0, 0.4);
   }
 }
@@ -282,6 +284,37 @@ h1 {
 
 .fleet-table a:hover {
   text-decoration: underline;
+}
+
+.fleet-status {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-1);
+  font-size: 0.85rem;
+  text-transform: capitalize;
+}
+
+.fleet-status-dot {
+  display: inline-block;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+}
+
+.fleet-status--online {
+  color: var(--color-online);
+}
+
+.fleet-status--online .fleet-status-dot {
+  background: var(--color-online);
+}
+
+.fleet-status--offline {
+  color: var(--color-danger);
+}
+
+.fleet-status--offline .fleet-status-dot {
+  background: var(--color-danger);
 }
 
 @media (max-width: 480px) {

@@ -36,11 +36,12 @@ npm run build
 - `src/layout/AppShell.tsx` -- shared header + content area every route
   renders inside.
 - `src/routes/FleetOverviewPage.tsx` -- every known host from `GET /hosts`,
-  as a table (hostname linking to its page, last-seen, CPU, memory), with
-  the same live-polling (`FLEET_POLL_INTERVAL_MS`, 5s) and
+  as a table (hostname linking to its page, a status badge, last-seen, CPU,
+  memory), with the same live-polling (`FLEET_POLL_INTERVAL_MS`, 5s) and
   first-load-only-error pattern as `HostPage`. A dash shown for a host's
-  CPU/memory means no data yet, not zero -- it does not mean the host is
-  offline; that determination is Week 6's FLEET-04, not this page.
+  CPU/memory means no data yet, not zero. The online/offline status badge
+  is the server's `status` field as-is (FLEET-04, `STALE_AFTER_SECONDS` in
+  the ingest API) -- the dashboard applies no threshold logic of its own.
 - `src/routes/HostPage.tsx` -- the single-host overview: fetches
   `GET /hosts/{host}/metrics/latest` and renders it as tiles, re-polling
   every `TILE_POLL_INTERVAL_MS` (5s) for live updates. Only the first load
@@ -155,3 +156,4 @@ every line either.
 | Task | File(s) |
 | --- | --- |
 | FLEET-03 fleet overview page | `src/routes/FleetOverviewPage.tsx`, `src/api/client.ts` (`fetchHosts`), `src/metrics/format.ts` (`formatRelativeTime`), `src/index.css` (`.fleet-table`) |
+| FLEET-04 online/offline status badge | `src/routes/FleetOverviewPage.tsx`, `src/api/types.ts` (`HostStatus`), `src/index.css` (`.fleet-status`) |

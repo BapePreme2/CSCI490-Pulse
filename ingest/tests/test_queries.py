@@ -1,8 +1,9 @@
+import psycopg
 import pytest
 
 from pulse_ingest.migrate import apply_migrations
 from pulse_ingest.schemas import MetricBatch
-from pulse_ingest.store import PostgresMetricStore
+from pulse_ingest.store import STALE_AFTER_SECONDS, PostgresMetricStore
 
 pytestmark = pytest.mark.integration
 
@@ -64,6 +65,54 @@ def test_list_hosts_reports_first_and_last_seen(store):
     assert host.first_seen_at == pytest.approx(host.last_seen_at, abs=1.0)
 
 
+def test_list_hosts_is_online_shortly_after_reporting(store):
+    store.write_batch(batch_dict("web-1", metric()))
+    (initial,) = store.list_hosts()
+
+    (host,) = store.list_hosts(now=initial.last_seen_at + 1)
+
+    assert host.status == "online"
+
+
+def test_list_hosts_is_offline_once_past_the_stale_threshold(store):
+    store.write_batch(batch_dict("web-1", metric()))
+    (initial,) = store.list_hosts()
+
+    (host,) = store.list_hosts(now=initial.last_seen_at + STALE_AFTER_SECONDS)
+
+    assert host.status == "offline"
+
+
+def test_list_hosts_is_online_just_under_the_stale_threshold(store):
+    store.write_batch(batch_dict("web-1", metric()))
+    (initial,) = store.list_hosts()
+
+    (host,) = store.list_hosts(now=initial.last_seen_at + STALE_AFTER_SECONDS - 0.001)
+
+    assert host.status == "online"
+
+
+def test_list_hosts_a_fresh_write_brings_an_offline_host_back_online(store):
+    store.write_batch(batch_dict("web-1", metric(ts=TS)))
+    (initial,) = store.list_hosts()
+    assert store.list_hosts(now=initial.last_seen_at + STALE_AFTER_SECONDS)[0].status == "offline"
+
+    store.write_batch(batch_dict("web-1", metric(ts=TS + 10)))
+
+    assert store.list_hosts(now=initial.last_seen_at + STALE_AFTER_SECONDS)[0].status == "online"
+
+
+def test_list_hosts_status_is_independent_per_host(store, db_url):
+    store.write_batch(batch_dict("web-1", metric()))
+    store.write_batch(batch_dict("web-2", metric()))
+    with psycopg.connect(db_url) as conn:
+        conn.execute("UPDATE hosts SET last_seen_at = to_timestamp(%s) WHERE hostname = 'web-1'", (TS,))
+
+    statuses = {h.hostname: h.status for h in store.list_hosts(now=TS + STALE_AFTER_SECONDS + 5)}
+
+    assert statuses == {"web-1": "offline", "web-2": "online"}
+
+
 def test_list_hosts_includes_key_metrics_when_present(store):
     store.write_batch(batch_dict(
         "web-1",
@@ -94,6 +143,23 @@ def test_list_hosts_ignores_tagged_readings_for_key_metrics(store):
     (host,) = store.list_hosts()
 
     assert host.cpu_usage is None
+
+
+def test_list_hosts_key_metrics_ignore_incidental_tags_like_environment(store):
+    # Regression: an agent's configured tags (environment, say) land on
+    # every metric it reports, overall cpu.usage and memory included --
+    # that must not be mistaken for a per-core reading and excluded.
+    store.write_batch(batch_dict(
+        "web-1",
+        metric(name="cpu.usage", value=42.0, environment="demo"),
+        metric(name="memory.used", unit="MB", value=512.0, environment="demo"),
+        metric(name="memory.total", unit="MB", value=2048.0, environment="demo"),
+    ))
+
+    (host,) = store.list_hosts()
+
+    assert host.cpu_usage == 42.0
+    assert host.memory_percent == pytest.approx(25.0)
 
 
 def test_list_hosts_key_metrics_use_the_latest_sample(store):

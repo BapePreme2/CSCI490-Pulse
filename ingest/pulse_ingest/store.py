@@ -1,13 +1,23 @@
 from __future__ import annotations
 
 import json
+import time
 from dataclasses import dataclass, field
-from typing import Protocol
+from typing import Literal, Protocol
 
 from psycopg.types.json import Jsonb
 from psycopg_pool import ConnectionPool
 
 from pulse_ingest.schemas import MetricBatch
+
+HostStatus = Literal["online", "offline"]
+
+# A host is "online" if its last report is more recent than this. Fixed and
+# generous rather than derived per-host from each agent's own interval
+# (which would need tracking recent gaps per host): comfortably above the
+# packaged agent's default 10s interval_seconds, while still flipping to
+# offline within a demo-able amount of time if an agent is killed.
+STALE_AFTER_SECONDS = 30
 
 # xmax = 0 is the standard Postgres idiom for "this row was just inserted,
 # not touched by the ON CONFLICT update branch" within the same command --
@@ -35,16 +45,24 @@ ON CONFLICT DO NOTHING
 _HOST_EXISTS = "SELECT 1 FROM hosts WHERE hostname = %s"
 
 # The "key metrics" a fleet overview shows at a glance: each host's overall
-# (untagged) cpu.usage and memory.used/memory.total, each as a single
-# DISTINCT ON per (host, metric) rather than one query per host. LEFT JOINed
-# onto every host so one with no data yet still appears, with nulls.
+# cpu.usage and memory.used/memory.total, each as a single DISTINCT ON per
+# (host, metric) rather than one query per host. LEFT JOINed onto every
+# host so one with no data yet still appears, with nulls.
+#
+# cpu.usage fans out per-core (tagged with "core"); the overall reading is
+# the one lacking that tag specifically -- NOT a requirement of zero tags
+# altogether, since an agent's other configured tags (environment, say)
+# land on every metric it reports, overall CPU included. memory.used/total
+# never fan out at all, so any reading for those names is "the" one
+# regardless of its tags.
 _LIST_HOSTS = """
 WITH key_metrics AS (
     SELECT DISTINCT ON (v.host_id, m.name)
         v.host_id, m.name, v.value
     FROM metric_values v
     JOIN metrics m ON m.id = v.metric_id
-    WHERE m.name IN ('cpu.usage', 'memory.used', 'memory.total') AND v.tags = '{}'::jsonb
+    WHERE (m.name = 'cpu.usage' AND NOT (v.tags ? 'core'))
+       OR m.name IN ('memory.used', 'memory.total')
     ORDER BY v.host_id, m.name, v.ts DESC
 )
 SELECT
@@ -105,6 +123,7 @@ class HostSummary:
     hostname: str
     first_seen_at: float
     last_seen_at: float
+    status: HostStatus
     cpu_usage: float | None = None
     memory_percent: float | None = None
 
@@ -130,8 +149,10 @@ class MetricStore(Protocol):
 class QueryStore(Protocol):
     def host_exists(self, host: str) -> bool: ...
 
-    def list_hosts(self) -> list[HostSummary]:
-        """Every known host, most recently active first."""
+    def list_hosts(self, now: float | None = None) -> list[HostSummary]:
+        """Every known host, most recently active first. `now` defaults to
+        the real current time; overridable so online/offline is testable
+        deterministically."""
 
     def get_latest(self, host: str) -> list[LatestMetric]:
         """The most recent value of every series (metric + tags) a host reports."""
@@ -192,7 +213,8 @@ class PostgresMetricStore:
         with self._pool.connection() as conn:
             return conn.execute(_HOST_EXISTS, (host,)).fetchone() is not None
 
-    def list_hosts(self) -> list[HostSummary]:
+    def list_hosts(self, now: float | None = None) -> list[HostSummary]:
+        now = time.time() if now is None else now
         with self._pool.connection() as conn:
             rows = conn.execute(_LIST_HOSTS).fetchall()
         return [
@@ -200,6 +222,7 @@ class PostgresMetricStore:
                 hostname=hostname,
                 first_seen_at=float(first),
                 last_seen_at=float(last),
+                status="online" if (now - float(last)) < STALE_AFTER_SECONDS else "offline",
                 cpu_usage=cpu,
                 memory_percent=(mem_used / mem_total * 100) if mem_used is not None and mem_total else None,
             )

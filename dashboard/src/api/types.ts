@@ -30,10 +30,13 @@ export interface HistoryResponse {
   series: HistorySeries[];
 }
 
+export type HostStatus = "online" | "offline";
+
 export interface FleetHost {
   hostname: string;
   first_seen_at: number;
   last_seen_at: number;
+  status: HostStatus;
   cpu_usage: number | null;
   memory_percent: number | null;
 }

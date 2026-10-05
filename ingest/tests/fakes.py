@@ -30,7 +30,7 @@ class FakeStore:
             raise self.error
         return host in self._hosts
 
-    def list_hosts(self):
+    def list_hosts(self, now=None):
         if self.error:
             raise self.error
         return self._host_summaries

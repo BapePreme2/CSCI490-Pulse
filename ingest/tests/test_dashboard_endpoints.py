@@ -24,10 +24,10 @@ def test_hosts_is_empty_when_none_have_reported():
     assert response.json() == {"hosts": []}
 
 
-def test_hosts_lists_each_host_with_its_key_metrics():
+def test_hosts_lists_each_host_with_its_key_metrics_and_status():
     summaries = [
-        HostSummary("web-1", 100.0, 200.0, cpu_usage=12.5, memory_percent=50.0),
-        HostSummary("web-2", 90.0, 95.0, cpu_usage=None, memory_percent=None),
+        HostSummary("web-1", 100.0, 200.0, status="online", cpu_usage=12.5, memory_percent=50.0),
+        HostSummary("web-2", 90.0, 95.0, status="offline", cpu_usage=None, memory_percent=None),
     ]
 
     response = client_for(host_summaries=summaries).get("/hosts")
@@ -39,6 +39,7 @@ def test_hosts_lists_each_host_with_its_key_metrics():
                 "hostname": "web-1",
                 "first_seen_at": 100.0,
                 "last_seen_at": 200.0,
+                "status": "online",
                 "cpu_usage": 12.5,
                 "memory_percent": 50.0,
             },
@@ -46,6 +47,7 @@ def test_hosts_lists_each_host_with_its_key_metrics():
                 "hostname": "web-2",
                 "first_seen_at": 90.0,
                 "last_seen_at": 95.0,
+                "status": "offline",
                 "cpu_usage": None,
                 "memory_percent": None,
             },

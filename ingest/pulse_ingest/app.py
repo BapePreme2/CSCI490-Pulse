@@ -119,6 +119,7 @@ def create_app(
                     "hostname": h.hostname,
                     "first_seen_at": h.first_seen_at,
                     "last_seen_at": h.last_seen_at,
+                    "status": h.status,
                     "cpu_usage": h.cpu_usage,
                     "memory_percent": h.memory_percent,
                 }

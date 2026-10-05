@@ -125,21 +125,43 @@ Responses:
 None of these endpoints require an API key, since the dashboard is a
 trusted internal client reading its own database, not an agent.
 
-**`GET /hosts`** -- every known host for the fleet overview page, with two
-"key metrics" computed in a single query (not one per host): the overall
-(untagged) `cpu.usage` and a `memory_percent` derived from
-`memory.used`/`memory.total`. Either is `null` if that host has no such
-data yet. This is identity/status only -- it does not say whether a host
-is online or offline; that determination is FLEET-04.
+**`GET /hosts`** -- every known host for the fleet overview page, with:
+
+- `status`: `"online"` if the host reported within the last
+  `STALE_AFTER_SECONDS` (30s, a fixed constant in `store.py`), `"offline"`
+  otherwise. Deliberately a generous fixed threshold rather than one
+  derived per-host from each agent's own interval, to stay simple; it
+  comfortably covers the packaged agent's default 10s `interval_seconds`
+  while still flipping to offline within a demo-able amount of time if an
+  agent is killed.
+- Two "key metrics" computed in a single query (not one per host): the
+  overall `cpu.usage` (the reading with no `core` tag -- not a requirement
+  of zero tags altogether, since an agent's other configured tags, e.g.
+  `environment`, land on every metric it reports) and a `memory_percent`
+  derived from `memory.used`/`memory.total` (which never fan out, so any
+  reading counts regardless of its tags). Either is `null` if that host has
+  no such data yet.
 
 ```json
 {
   "hosts": [
     {"hostname": "web-1", "first_seen_at": 1789415000.0, "last_seen_at": 1789419042.0,
-     "cpu_usage": 42.5, "memory_percent": 61.2}
+     "status": "online", "cpu_usage": 42.5, "memory_percent": 61.2}
   ]
 }
 ```
+
+**A real bug this caught:** the first version of this query required tags
+to be *exactly* `{}` to count as the "overall" cpu.usage/memory reading.
+That's the same bug class DASH-04 hit on the frontend, just in SQL this
+time: this project's own demo agent config sets `tags: {environment:
+demo}`, which lands on every metric including the overall one, so the
+exact-match filter never matched anything and `cpu_usage`/`memory_percent`
+were silently `null` for any realistically configured agent. No test
+caught it, since every fixture used bare, tag-free metrics. Found only by
+running the real agent against the real API and noticing the fleet page
+showed dashes it shouldn't have. Fixed by checking for the absence of the
+`core` tag specifically (`NOT (v.tags ? 'core')`) instead of zero tags.
 
 **`GET /hosts/{host}/metrics/latest`** -- the most recent value of every
 series (metric + tags) the host has reported.
@@ -281,3 +303,4 @@ half-applied. To add one, create the next numbered file, e.g.
 | FLEET-01 index/query cleanly across many hosts | `migrations/002_index_hosts_last_seen.sql`, `pulse_ingest/store.py` (`list_hosts`), `tests/test_queries.py`, `tests/test_migrate.py` |
 | FLEET-02 host self-registration | `pulse_ingest/store.py` (`WriteResult.new_host`), `pulse_ingest/app.py`, `tests/test_store.py`, `tests/test_ingest.py`, `tests/fakes.py` |
 | FLEET-03 fleet overview endpoint | `pulse_ingest/store.py` (`list_hosts` key metrics), `pulse_ingest/app.py` (`GET /hosts`), `tests/test_queries.py`, `tests/test_dashboard_endpoints.py` |
+| FLEET-04 heartbeat/stale detection | `pulse_ingest/store.py` (`STALE_AFTER_SECONDS`, `HostSummary.status`), `tests/test_queries.py`, `tests/test_dashboard_endpoints.py` |
