@@ -23,11 +23,11 @@ class RecordingSender:
 
 
 def make_agent(sender, **config_overrides):
+    config_overrides.setdefault("tags", {"team": "platform"})
     config = AgentConfig(
         endpoint="http://127.0.0.1:1/metrics",
         api_key="k",
         hostname="web-1",
-        tags={"environment": "dev"},
         **config_overrides,
     )
     agent = PulseAgent(config, sender=sender)
@@ -40,7 +40,44 @@ def test_metrics_are_tagged_with_host_and_configured_tags():
     make_agent(sender).run_once()
 
     (metric,) = sender.batches[0]
-    assert metric.tags == {"core": "0", "host": "web-1", "environment": "dev"}
+    assert metric.tags == {"core": "0", "host": "web-1", "team": "platform"}
+
+
+def test_metrics_are_tagged_with_environment_when_configured():
+    sender = RecordingSender()
+    make_agent(sender, environment="prod").run_once()
+
+    (metric,) = sender.batches[0]
+    assert metric.tags["environment"] == "prod"
+    assert metric.tags["host"] == "web-1"
+    assert metric.tags["team"] == "platform"
+
+
+def test_environment_tag_is_omitted_when_not_configured():
+    sender = RecordingSender()
+    make_agent(sender).run_once()
+
+    (metric,) = sender.batches[0]
+    assert "environment" not in metric.tags
+
+
+def test_hostname_tag_cannot_be_overridden_by_a_crafted_tags_dict():
+    # Defense in depth: AgentConfig itself doesn't validate this (from_dict
+    # does), so this exercises the agent's own merge order directly, for a
+    # config built some other way than loading YAML.
+    sender = RecordingSender()
+    make_agent(sender, tags={"host": "spoofed"}).run_once()
+
+    (metric,) = sender.batches[0]
+    assert metric.tags["host"] == "web-1"
+
+
+def test_environment_tag_cannot_be_overridden_by_a_crafted_tags_dict():
+    sender = RecordingSender()
+    make_agent(sender, environment="prod", tags={"environment": "spoofed"}).run_once()
+
+    (metric,) = sender.batches[0]
+    assert metric.tags["environment"] == "prod"
 
 
 def test_failed_send_keeps_metrics_buffered_for_retry():

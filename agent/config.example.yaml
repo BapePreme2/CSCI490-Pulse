@@ -13,9 +13,13 @@ interval_seconds: 10
 # Defaults to the machine's hostname if omitted.
 hostname: null
 
-# Arbitrary tags attached to every metric this agent reports.
-tags:
-  environment: dev
+# Optional environment label (e.g. dev/staging/prod), reported as a tag on
+# every metric this agent sends. Omit it if you don't need one.
+environment: dev
+
+# Arbitrary other labels attached to every metric. Cannot include "host" or
+# "environment" -- those are set automatically from the fields above.
+tags: {}
 
 # How many batches worth of metrics to retain in memory while retrying a
 # failed send, before the oldest metrics start getting dropped.

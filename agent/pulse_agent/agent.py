@@ -50,7 +50,14 @@ class PulseAgent:
         for collector in self.collectors:
             metrics.extend(collector.collect())
 
-        host_tags = {"host": self.config.hostname, **self.config.tags}
+        # host/environment are applied last so they can never be clobbered
+        # by a crafted tags dict, even bypassing from_dict's own validation
+        # of this (e.g. a config built directly rather than loaded from YAML).
+        host_tags: dict[str, str] = dict(self.config.tags)
+        if self.config.environment:
+            host_tags["environment"] = self.config.environment
+        host_tags["host"] = self.config.hostname
+
         for metric in metrics:
             for key, value in host_tags.items():
                 metric.tags.setdefault(key, value)

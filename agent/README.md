@@ -43,6 +43,18 @@ safe because the API deduplicates samples, so resent data is not stored
 twice. The agent logs a warning if the endpoint is plain `http://` to a
 non-local host, since the API key would travel unencrypted.
 
+## Labeling
+
+Every metric is tagged with `host` (from `hostname`, or the machine's real
+hostname if omitted) and, if set, `environment` -- both applied last in
+`PulseAgent.collect_once()` so they can never be overridden by a crafted
+`tags` entry, even bypassing `from_dict`'s own validation of this (e.g. a
+config built directly rather than loaded from YAML). `tags` is for anything
+else and is validated at config-load time: it must be a mapping, every key
+must be non-empty, values are coerced to strings, and it cannot contain
+`host` or `environment` -- those have their own fields specifically so a
+typo inside `tags` can't silently create a second, conflicting label.
+
 ## Test
 
 ```bash
@@ -84,3 +96,9 @@ pytest
 | Task | File(s) |
 | --- | --- |
 | AGENT-11 HTTP client | `pulse_agent/sender.py`, `tests/test_sender.py`, `tests/test_agent.py` |
+
+## Task mapping (Week 6)
+
+| Task | File(s) |
+| --- | --- |
+| AGENT-12 hostname/tag/environment labeling | `pulse_agent/config.py` (`environment` field, `_validate_tags`), `pulse_agent/agent.py`, `config.example.yaml`, `tests/test_config.py`, `tests/test_agent.py` |
