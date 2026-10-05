@@ -11,10 +11,11 @@ the full scope and schedule.
 
 - `agent/` — the host monitoring agent (Python). Collects CPU, load
   average, memory, disk, and network metrics and reports them to the
-  ingestion API. See `agent/README.md`.
-- `ingest/` — ingestion API + Postgres storage layer (in progress, Week 4).
-  See `ingest/README.md`.
-- `dashboard/` — fleet dashboard (planned, Week 5).
+  ingestion API. See `agent/README.md` to develop it, or
+  `agent/DEPLOY.md` to put it on a machine you want monitored.
+- `ingest/` — ingestion API + Postgres storage layer. See `ingest/README.md`.
+- `dashboard/` — fleet and single-host dashboard (React). See
+  `dashboard/README.md`.
 - `scripts/dev-db.sh` — starts/stops the local development Postgres (Docker).
 
 Each subdirectory is its own project with its own dependencies.

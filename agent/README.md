@@ -4,6 +4,9 @@ Lightweight host monitoring agent. Collects CPU, load average, memory,
 disk, and network metrics on an interval and reports them to the Pulse
 ingestion API.
 
+This README is for developing the agent. To put it on a machine you want
+monitored, see [`DEPLOY.md`](DEPLOY.md) instead.
+
 ## Setup
 
 ```bash
@@ -102,3 +105,4 @@ pytest
 | Task | File(s) |
 | --- | --- |
 | AGENT-12 hostname/tag/environment labeling | `pulse_agent/config.py` (`environment` field, `_validate_tags`), `pulse_agent/agent.py`, `config.example.yaml`, `tests/test_config.py`, `tests/test_agent.py` |
+| OPS-01 install/run instructions for a new host | `DEPLOY.md` |
