@@ -102,27 +102,41 @@ WHERE h.hostname = %s AND m.name = %s
 ORDER BY m.unit, v.tags, v.ts
 """
 
-# The latest recent sample of every series each enabled rule watches, for
-# all rules at once. A rule's tag_filter matches a series when its non-null
-# values are contained in the series' tags and none of its null-valued keys
-# are present at all (see migrations/003_alert_rules.sql). DISTINCT ON keeps
-# one row per (rule, series); the ORDER BY leads with the same columns.
-_RULE_SAMPLES_QUERY = """
-SELECT DISTINCT ON (r.id, v.host_id, v.metric_id, v.tags)
-    r.id, r.name, r.metric_name, r.operator, r.threshold,
-    h.hostname, m.unit, v.tags, v.value, extract(epoch FROM v.ts)
-FROM alert_rules r
-JOIN metrics m ON m.name = r.metric_name
-JOIN metric_values v ON v.metric_id = m.id
-JOIN hosts h ON h.id = v.host_id
-WHERE r.enabled
-  AND (r.host_id IS NULL OR r.host_id = v.host_id)
-  AND v.ts >= to_timestamp(%s)
-  AND v.tags @> jsonb_strip_nulls(r.tag_filter)
-  AND NOT (v.tags ?| ARRAY(
-      SELECT key FROM jsonb_each(r.tag_filter) WHERE value = 'null'::jsonb
-  ))
-ORDER BY r.id, v.host_id, v.metric_id, v.tags, v.ts DESC
+# Every series each enabled rule watches whose latest sample is at or after
+# `since`, with that series' samples from (duration_seconds + padding) before
+# its latest sample onward: the sliding window ALERT-03's sustained-duration
+# check walks back through. A rule's tag_filter matches a series when its
+# non-null values are contained in the series' tags and none of its
+# null-valued keys are present at all (see migrations/003_alert_rules.sql).
+#
+# The inner ts filter only bounds the scan: since a kept series' latest
+# sample is >= since, none of its window starts earlier than that bound.
+_RULE_SERIES_QUERY = """
+WITH matched AS (
+    SELECT
+        r.id AS rule_id, r.name AS rule_name, r.metric_name, r.operator, r.threshold,
+        r.duration_seconds, v.host_id, v.metric_id, v.tags, v.ts, v.value,
+        max(v.ts) OVER (PARTITION BY r.id, v.host_id, v.metric_id, v.tags) AS latest_ts
+    FROM alert_rules r
+    JOIN metrics m ON m.name = r.metric_name
+    JOIN metric_values v ON v.metric_id = m.id
+    WHERE r.enabled
+      AND (r.host_id IS NULL OR r.host_id = v.host_id)
+      AND v.ts >= to_timestamp(%(since)s) - (r.duration_seconds + %(padding)s) * interval '1 second'
+      AND v.tags @> jsonb_strip_nulls(r.tag_filter)
+      AND NOT (v.tags ?| ARRAY(
+          SELECT key FROM jsonb_each(r.tag_filter) WHERE value = 'null'::jsonb
+      ))
+)
+SELECT
+    x.rule_id, x.rule_name, x.metric_name, x.operator, x.threshold, x.duration_seconds,
+    h.hostname, m.unit, x.tags, extract(epoch FROM x.ts), x.value
+FROM matched x
+JOIN hosts h ON h.id = x.host_id
+JOIN metrics m ON m.id = x.metric_id
+WHERE x.latest_ts >= to_timestamp(%(since)s)
+  AND x.ts >= x.latest_ts - (x.duration_seconds + %(padding)s) * interval '1 second'
+ORDER BY x.rule_id, x.host_id, x.metric_id, x.tags, x.ts
 """
 
 
@@ -165,19 +179,19 @@ class HistorySeries:
 
 
 @dataclass(frozen=True)
-class RuleSample:
-    """The latest sample of one series an alert rule watches."""
+class RuleSeries:
+    """The recent samples of one series an alert rule watches, oldest first."""
 
     rule_id: int
     rule_name: str
     metric_name: str
     operator: str
     threshold: float
+    duration_seconds: int
     hostname: str
     unit: str
     tags: dict[str, str]
-    value: float
-    timestamp: float
+    points: list[HistoryPoint] = field(default_factory=list)
 
 
 class MetricStore(Protocol):
@@ -208,9 +222,11 @@ class Store(MetricStore, QueryStore, Protocol):
 
 
 class AlertStore(Protocol):
-    def latest_rule_samples(self, since: float) -> list[RuleSample]:
-        """For every enabled rule, the latest sample at or after `since` of
-        each series it matches. Series with nothing that recent are omitted."""
+    def rule_series(self, since: float, padding: float) -> list[RuleSeries]:
+        """For every enabled rule, each series it matches whose latest sample
+        is at or after `since`, with its samples from `duration_seconds +
+        padding` before that latest sample onward. Series with nothing that
+        recent are omitted."""
 
 
 class PostgresMetricStore:
@@ -305,21 +321,29 @@ class PostgresMetricStore:
             series_by_key[key].points.append(HistoryPoint(timestamp=float(ts), value=value))
         return [series_by_key[key] for key in order]
 
-    def latest_rule_samples(self, since: float) -> list[RuleSample]:
+    def rule_series(self, since: float, padding: float) -> list[RuleSeries]:
         with self._pool.connection() as conn:
-            rows = conn.execute(_RULE_SAMPLES_QUERY, (since,)).fetchall()
-        return [
-            RuleSample(
-                rule_id=rule_id,
-                rule_name=rule_name,
-                metric_name=metric_name,
-                operator=operator,
-                threshold=threshold,
-                hostname=hostname,
-                unit=unit,
-                tags=tags,
-                value=value,
-                timestamp=float(ts),
-            )
-            for rule_id, rule_name, metric_name, operator, threshold, hostname, unit, tags, value, ts in rows
-        ]
+            rows = conn.execute(_RULE_SERIES_QUERY, {"since": since, "padding": padding}).fetchall()
+
+        # Rows arrive grouped by series (the ORDER BY), so a new series starts
+        # whenever the key changes.
+        result: list[RuleSeries] = []
+        for rule_id, rule_name, metric_name, op, threshold, duration, hostname, unit, tags, ts, value in rows:
+            current = result[-1] if result else None
+            if current is None or (current.rule_id, current.hostname, current.unit, current.tags) != (
+                rule_id, hostname, unit, tags
+            ):
+                current = RuleSeries(
+                    rule_id=rule_id,
+                    rule_name=rule_name,
+                    metric_name=metric_name,
+                    operator=op,
+                    threshold=threshold,
+                    duration_seconds=duration,
+                    hostname=hostname,
+                    unit=unit,
+                    tags=tags,
+                )
+                result.append(current)
+            current.points.append(HistoryPoint(timestamp=float(ts), value=value))
+        return result

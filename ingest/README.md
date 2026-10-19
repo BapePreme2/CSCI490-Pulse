@@ -335,29 +335,56 @@ While the API is running, a background thread (`RuleEvaluator` in
 `PULSE_ALERT_INTERVAL_SECONDS` (default 10, the agent's default reporting
 interval). Each cycle:
 
-1. One query (`latest_rule_samples()` in `store.py`) fetches, for every
-   enabled rule, the **latest sample of each series it matches**, using the
-   rule's `host` and `tag_filter` as described above.
-2. Each sample is compared against its rule's `operator` and `threshold`,
-   giving an `Evaluation` that is breaching or not.
+1. One query (`rule_series()` in `store.py`) fetches every series each
+   enabled rule matches (by the rule's `host` and `tag_filter`, as described
+   above), with that series' **sliding window**: its samples from
+   `duration_seconds` + 30s before its latest sample, up to that sample.
+2. Each window is evaluated (`evaluate()` in `alerts.py`) into an
+   `Evaluation` with three facts: `breaching` (the latest sample is past the
+   threshold), `sustained` (it has stayed past it for the rule's full
+   `duration_seconds`), and `breaching_since` (when the current run began).
 3. The evaluations go to a handler. For now that's `BreachLogger`, which
-   logs at INFO when a series starts or stops breaching (not every cycle):
+   logs at INFO when a series' verdict changes (not every cycle):
 
 ```
-INFO pulse_ingest.alerts: Rule breaching: #1 'High CPU' on web-1: cpu.usage{core=0} = 93.5 percent (> 80)
+INFO pulse_ingest.alerts: Rule breaching, pending until sustained for 300s: #1 'High CPU' on web-1: cpu.usage{core=0} = 93.5 percent (> 80)
+INFO pulse_ingest.alerts: Rule breach sustained for 300s: #1 'High CPU' on web-1: cpu.usage{core=0} = 95 percent (> 80)
 INFO pulse_ingest.alerts: Rule no longer breaching: #1 'High CPU' on web-1: cpu.usage{core=0} = 41 percent (> 80)
 ```
 
-**Only recent samples count.** A series is evaluated only if it reported
-within the last `STALE_AFTER_SECONDS` (30s), the same window that marks a
-host offline. Without that, a host that died mid-spike would be judged on
-its last value forever. A series with no recent sample is left out of the
-cycle entirely, so it is neither breaching nor OK.
+**Sustained duration (ALERT-03).** Walking back from the latest sample, a
+series' current run is the unbroken stretch of samples that all breach. It
+ends at a sample back within the threshold, or at a gap of more than 30s
+between samples (`STALE_AFTER_SECONDS`, the same silence that marks a host
+offline): with no data across the gap there's no evidence the breach held
+through it. The breach is **sustained** once
+`latest sample time - run start >= duration_seconds`. So with the agent's
+10s interval, a 300s rule needs 31 breaching samples in a row, and a single
+dip resets it. `duration_seconds = 0` is sustained on the first breaching
+sample.
 
-What this step deliberately doesn't do yet: `duration_seconds` is not applied
-(a single breaching sample counts as breaching; the sliding window is
-ALERT-03), and nothing fires, resolves, or notifies (the state machine is
-ALERT-04, which replaces `BreachLogger` as the handler).
+The window reaches 30s further back than the duration so that a run which
+started right at the window's edge still shows up as one (any run long
+enough to count has a sample in that extra 30s, since its samples are at
+most 30s apart). The duration is measured in sample timestamps (the agent's
+clock), not in evaluation cycles, so it doesn't depend on how often the
+evaluator runs, and it survives an API restart because the history lives in
+Postgres, not in memory.
+
+One consequence: an agent configured with `interval_seconds` above 30
+leaves gaps that break every run, so rules with a non-zero duration would
+never be sustained. That's the same limit that would show such a host as
+offline between reports.
+
+**Only recent series count.** A series is evaluated only if its latest
+sample is within the last 30s. Without that, a host that died mid-spike
+would be judged on its last value forever. A series with no recent sample is
+left out of the cycle entirely, so it is neither breaching nor OK.
+
+What this doesn't do yet: nothing fires, resolves, or notifies. That's the
+state machine (ALERT-04), which will use `sustained` for Firing and
+`breaching` without `sustained` for Pending, and replace `BreachLogger` as
+the handler.
 
 Operational notes:
 
@@ -424,4 +451,5 @@ half-applied. To add one, create the next numbered file, e.g.
 | Task | File(s) |
 | --- | --- |
 | ALERT-01 alert rule schema | `migrations/003_alert_rules.sql`, `pulse_ingest/schemas.py` (`AlertRuleIn`), `tests/test_schemas.py`, `tests/test_migrate.py` |
-| ALERT-02 rule evaluation loop | `pulse_ingest/alerts.py`, `pulse_ingest/store.py` (`latest_rule_samples`), `pulse_ingest/app.py` (lifespan), `tests/test_alerts.py`, `tests/test_alert_queries.py`, `tests/test_round_trip.py` |
+| ALERT-02 rule evaluation loop | `pulse_ingest/alerts.py`, `pulse_ingest/store.py` (`rule_series`), `pulse_ingest/app.py` (lifespan), `tests/test_alerts.py`, `tests/test_alert_queries.py`, `tests/test_round_trip.py` |
+| ALERT-03 sustained duration via sliding window | `pulse_ingest/alerts.py` (`evaluate`), `pulse_ingest/store.py` (`rule_series` window), `tests/test_alerts.py`, `tests/test_alert_queries.py`, `tests/test_round_trip.py` |

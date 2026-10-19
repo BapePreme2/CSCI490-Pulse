@@ -193,20 +193,23 @@ def test_wrong_api_key_stores_nothing_and_agent_keeps_retrying(db_url, procs, tm
 
 
 def test_running_api_evaluates_alert_rules_against_live_agent_data(db_url, procs, tmp_path):
-    # memory.total > 0 is always true, so the evaluator should report it
-    # breaching as soon as the agent's first batch lands.
+    # memory.total > 0 is always true, so with the agent reporting every
+    # second the rule should go pending on the first sample, then sustained
+    # once 3 seconds of breaching samples have landed.
     query(
         db_url,
         "INSERT INTO alert_rules (name, metric_name, operator, threshold, duration_seconds) "
-        "VALUES ('always', 'memory.total', '>', 0, 0) RETURNING id",
+        "VALUES ('always', 'memory.total', '>', 0, 3) RETURNING id",
     )
     port = free_port()
     start_api(db_url, port, procs, tmp_path, PULSE_ALERT_INTERVAL_SECONDS="0.5")
     start_agent(port, API_KEY, procs, tmp_path)
     api_log = tmp_path / f"api-{port}.log"
 
-    breached = wait_for(lambda: "Rule breaching" in api_log.read_text(), timeout=20)
+    sustained = wait_for(lambda: "Rule breach sustained" in api_log.read_text(), timeout=20)
 
-    assert breached, "evaluator never reported the rule\n" + logs(tmp_path)
-    line = next(l for l in api_log.read_text().splitlines() if "Rule breaching" in l)
-    assert f"'always' on {HOST}: memory.total{{environment=e2e}}" in line
+    assert sustained, "evaluator never reported the rule sustained\n" + logs(tmp_path)
+    lines = [l for l in api_log.read_text().splitlines() if "Rule " in l]
+    series = f"'always' on {HOST}: memory.total{{environment=e2e}}"
+    assert "Rule breaching, pending until sustained for 3s" in lines[0] and series in lines[0], lines
+    assert "Rule breach sustained for 3s" in lines[1] and series in lines[1], lines
