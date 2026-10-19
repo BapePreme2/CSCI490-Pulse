@@ -328,6 +328,59 @@ The database repeats the important checks as constraints (operator set,
 finite threshold, duration range, `tag_filter` is a JSON object), so a bad
 row can't get in through some path other than the API.
 
+## Rule evaluation
+
+While the API is running, a background thread (`RuleEvaluator` in
+`pulse_ingest/alerts.py`) evaluates every enabled rule every
+`PULSE_ALERT_INTERVAL_SECONDS` (default 10, the agent's default reporting
+interval). Each cycle:
+
+1. One query (`latest_rule_samples()` in `store.py`) fetches, for every
+   enabled rule, the **latest sample of each series it matches**, using the
+   rule's `host` and `tag_filter` as described above.
+2. Each sample is compared against its rule's `operator` and `threshold`,
+   giving an `Evaluation` that is breaching or not.
+3. The evaluations go to a handler. For now that's `BreachLogger`, which
+   logs at INFO when a series starts or stops breaching (not every cycle):
+
+```
+INFO pulse_ingest.alerts: Rule breaching: #1 'High CPU' on web-1: cpu.usage{core=0} = 93.5 percent (> 80)
+INFO pulse_ingest.alerts: Rule no longer breaching: #1 'High CPU' on web-1: cpu.usage{core=0} = 41 percent (> 80)
+```
+
+**Only recent samples count.** A series is evaluated only if it reported
+within the last `STALE_AFTER_SECONDS` (30s), the same window that marks a
+host offline. Without that, a host that died mid-spike would be judged on
+its last value forever. A series with no recent sample is left out of the
+cycle entirely, so it is neither breaching nor OK.
+
+What this step deliberately doesn't do yet: `duration_seconds` is not applied
+(a single breaching sample counts as breaching; the sliding window is
+ALERT-03), and nothing fires, resolves, or notifies (the state machine is
+ALERT-04, which replaces `BreachLogger` as the handler).
+
+Operational notes:
+
+- If the database is unreachable, the cycle logs a one-line warning and the
+  loop retries on the next interval. Any other error is logged with a
+  traceback; neither stops the thread.
+- The evaluator only starts when the app owns its Postgres store, i.e. a
+  real `uvicorn` run, not API tests that inject a fake store.
+- Run **one** API process. Each process runs its own evaluator, so
+  `uvicorn --workers 4` would evaluate (and, after ALERT-04, notify) every
+  rule four times.
+- Shutdown interrupts the wait between cycles, so stopping the API doesn't
+  hang for up to a full interval.
+
+There's no API for rules yet (that's ALERT-05), so to try it, add one in
+SQL and watch the API log:
+
+```bash
+docker exec -it pulse-postgres psql -U pulse -d pulse -c "
+  INSERT INTO alert_rules (name, metric_name, operator, threshold, duration_seconds, tag_filter)
+  VALUES ('High overall CPU', 'cpu.usage', '>', 50, 0, '{\"core\": null}')"
+```
+
 ## Migrations
 
 `python -m pulse_ingest.migrate` applies each un-applied `migrations/*.sql`
@@ -371,3 +424,4 @@ half-applied. To add one, create the next numbered file, e.g.
 | Task | File(s) |
 | --- | --- |
 | ALERT-01 alert rule schema | `migrations/003_alert_rules.sql`, `pulse_ingest/schemas.py` (`AlertRuleIn`), `tests/test_schemas.py`, `tests/test_migrate.py` |
+| ALERT-02 rule evaluation loop | `pulse_ingest/alerts.py`, `pulse_ingest/store.py` (`latest_rule_samples`), `pulse_ingest/app.py` (lifespan), `tests/test_alerts.py`, `tests/test_alert_queries.py`, `tests/test_round_trip.py` |

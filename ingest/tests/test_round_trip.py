@@ -75,8 +75,8 @@ def spawn(args, log_path, procs, **kwargs):
     return proc
 
 
-def start_api(db_url, port, procs, tmp_path):
-    env = {**os.environ, "PULSE_DATABASE_URL": db_url, "PULSE_API_KEYS": API_KEY}
+def start_api(db_url, port, procs, tmp_path, **extra_env):
+    env = {**os.environ, "PULSE_DATABASE_URL": db_url, "PULSE_API_KEYS": API_KEY, **extra_env}
     spawn(
         [sys.executable, "-m", "uvicorn", "pulse_ingest.app:app",
          "--port", str(port), "--log-level", "warning"],
@@ -190,3 +190,23 @@ def test_wrong_api_key_stores_nothing_and_agent_keeps_retrying(db_url, procs, tm
     assert query(db_url, "SELECT count(*) FROM metric_values") == [(0,)]
     assert query(db_url, "SELECT count(*) FROM hosts") == [(0,)]
     assert "check api_key" in (tmp_path / "agent-not-the-key.log").read_text()
+
+
+def test_running_api_evaluates_alert_rules_against_live_agent_data(db_url, procs, tmp_path):
+    # memory.total > 0 is always true, so the evaluator should report it
+    # breaching as soon as the agent's first batch lands.
+    query(
+        db_url,
+        "INSERT INTO alert_rules (name, metric_name, operator, threshold, duration_seconds) "
+        "VALUES ('always', 'memory.total', '>', 0, 0) RETURNING id",
+    )
+    port = free_port()
+    start_api(db_url, port, procs, tmp_path, PULSE_ALERT_INTERVAL_SECONDS="0.5")
+    start_agent(port, API_KEY, procs, tmp_path)
+    api_log = tmp_path / f"api-{port}.log"
+
+    breached = wait_for(lambda: "Rule breaching" in api_log.read_text(), timeout=20)
+
+    assert breached, "evaluator never reported the rule\n" + logs(tmp_path)
+    line = next(l for l in api_log.read_text().splitlines() if "Rule breaching" in l)
+    assert f"'always' on {HOST}: memory.total{{environment=e2e}}" in line

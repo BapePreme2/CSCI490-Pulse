@@ -102,6 +102,29 @@ WHERE h.hostname = %s AND m.name = %s
 ORDER BY m.unit, v.tags, v.ts
 """
 
+# The latest recent sample of every series each enabled rule watches, for
+# all rules at once. A rule's tag_filter matches a series when its non-null
+# values are contained in the series' tags and none of its null-valued keys
+# are present at all (see migrations/003_alert_rules.sql). DISTINCT ON keeps
+# one row per (rule, series); the ORDER BY leads with the same columns.
+_RULE_SAMPLES_QUERY = """
+SELECT DISTINCT ON (r.id, v.host_id, v.metric_id, v.tags)
+    r.id, r.name, r.metric_name, r.operator, r.threshold,
+    h.hostname, m.unit, v.tags, v.value, extract(epoch FROM v.ts)
+FROM alert_rules r
+JOIN metrics m ON m.name = r.metric_name
+JOIN metric_values v ON v.metric_id = m.id
+JOIN hosts h ON h.id = v.host_id
+WHERE r.enabled
+  AND (r.host_id IS NULL OR r.host_id = v.host_id)
+  AND v.ts >= to_timestamp(%s)
+  AND v.tags @> jsonb_strip_nulls(r.tag_filter)
+  AND NOT (v.tags ?| ARRAY(
+      SELECT key FROM jsonb_each(r.tag_filter) WHERE value = 'null'::jsonb
+  ))
+ORDER BY r.id, v.host_id, v.metric_id, v.tags, v.ts DESC
+"""
+
 
 @dataclass(frozen=True)
 class WriteResult:
@@ -141,6 +164,22 @@ class HistorySeries:
     points: list[HistoryPoint] = field(default_factory=list)
 
 
+@dataclass(frozen=True)
+class RuleSample:
+    """The latest sample of one series an alert rule watches."""
+
+    rule_id: int
+    rule_name: str
+    metric_name: str
+    operator: str
+    threshold: float
+    hostname: str
+    unit: str
+    tags: dict[str, str]
+    value: float
+    timestamp: float
+
+
 class MetricStore(Protocol):
     def write_batch(self, batch: MetricBatch) -> WriteResult:
         """Persist a batch atomically; already-stored samples are skipped."""
@@ -166,6 +205,12 @@ class QueryStore(Protocol):
 
 class Store(MetricStore, QueryStore, Protocol):
     """Everything the API needs from a storage backend."""
+
+
+class AlertStore(Protocol):
+    def latest_rule_samples(self, since: float) -> list[RuleSample]:
+        """For every enabled rule, the latest sample at or after `since` of
+        each series it matches. Series with nothing that recent are omitted."""
 
 
 class PostgresMetricStore:
@@ -259,3 +304,22 @@ class PostgresMetricStore:
                 order.append(key)
             series_by_key[key].points.append(HistoryPoint(timestamp=float(ts), value=value))
         return [series_by_key[key] for key in order]
+
+    def latest_rule_samples(self, since: float) -> list[RuleSample]:
+        with self._pool.connection() as conn:
+            rows = conn.execute(_RULE_SAMPLES_QUERY, (since,)).fetchall()
+        return [
+            RuleSample(
+                rule_id=rule_id,
+                rule_name=rule_name,
+                metric_name=metric_name,
+                operator=operator,
+                threshold=threshold,
+                hostname=hostname,
+                unit=unit,
+                tags=tags,
+                value=value,
+                timestamp=float(ts),
+            )
+            for rule_id, rule_name, metric_name, operator, threshold, hostname, unit, tags, value, ts in rows
+        ]

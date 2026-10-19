@@ -13,6 +13,7 @@ from fastapi.responses import JSONResponse
 from psycopg_pool import PoolTimeout
 
 from pulse_ingest import __version__
+from pulse_ingest.alerts import DEFAULT_INTERVAL_SECONDS, BreachLogger, RuleEvaluator
 from pulse_ingest.auth import extract_bearer_token, is_valid_key, load_api_keys
 from pulse_ingest.migrate import database_url
 from pulse_ingest.schemas import MetricBatch
@@ -31,6 +32,10 @@ AGENT_PATHS = {"/metrics"}
 
 DEFAULT_HISTORY_RANGE_SECONDS = 3600
 MAX_HISTORY_RANGE_SECONDS = 30 * 24 * 3600
+
+
+def _alert_interval() -> float:
+    return float(os.environ.get("PULSE_ALERT_INTERVAL_SECONDS", DEFAULT_INTERVAL_SECONDS))
 
 
 def _default_cors_origins() -> list[str]:
@@ -52,13 +57,24 @@ def create_app(
     owned_store = PostgresMetricStore(database_url()) if store is None else None
     store = store or owned_store
 
+    # Rule evaluation runs only against the app's own Postgres store, i.e. in
+    # a real deployment; API tests that inject a fake store don't start it.
+    # Run a single API process: each one would evaluate every rule.
+    evaluator = (
+        RuleEvaluator(owned_store, BreachLogger(), interval=_alert_interval()) if owned_store else None
+    )
+
     @asynccontextmanager
     async def lifespan(_app: FastAPI):
         if owned_store:
             owned_store.open()
+        if evaluator:
+            evaluator.start()
         try:
             yield
         finally:
+            if evaluator:
+                evaluator.stop()
             if owned_store:
                 owned_store.close()
 
