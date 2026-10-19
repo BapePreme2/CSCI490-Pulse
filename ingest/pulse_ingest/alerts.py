@@ -6,12 +6,12 @@ import operator
 import threading
 import time
 from collections.abc import Callable, Iterable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 import psycopg
 from psycopg_pool import PoolTimeout
 
-from pulse_ingest.store import STALE_AFTER_SECONDS, AlertStore, RuleSeries
+from pulse_ingest.store import STALE_AFTER_SECONDS, Alert, AlertChange, AlertStore, RuleSeries
 
 logger = logging.getLogger(__name__)
 
@@ -25,7 +25,13 @@ OPERATORS: dict[str, Callable[[float, float], bool]] = {
     "<=": operator.le,
 }
 
-SeriesKey = tuple[int, str, str, str]
+# (rule id, hostname, unit, tags as sorted JSON). The rule id is None for an
+# alert whose rule has since been deleted.
+SeriesKey = tuple[int | None, str, str, str]
+
+
+def _series_key(rule_id: int | None, hostname: str, unit: str, tags: dict[str, str]) -> SeriesKey:
+    return (rule_id, hostname, unit, json.dumps(tags, sort_keys=True))
 
 
 @dataclass(frozen=True)
@@ -47,7 +53,7 @@ class Evaluation:
     def series_key(self) -> SeriesKey:
         """Identifies one (rule, series) pair across evaluation cycles."""
         s = self.series
-        return (s.rule_id, s.hostname, s.unit, json.dumps(s.tags, sort_keys=True))
+        return _series_key(s.rule_id, s.hostname, s.unit, s.tags)
 
 
 def evaluate(series: Iterable[RuleSeries], max_gap: float = STALE_AFTER_SECONDS) -> list[Evaluation]:
@@ -92,7 +98,7 @@ class RuleEvaluator:
     def __init__(
         self,
         store: AlertStore,
-        handle: Callable[[list[Evaluation]], None],
+        handle: Callable[[list[Evaluation], float], object],
         interval: float = DEFAULT_INTERVAL_SECONDS,
         max_age: float = STALE_AFTER_SECONDS,
         max_gap: float = STALE_AFTER_SECONDS,
@@ -112,9 +118,10 @@ class RuleEvaluator:
     def evaluate_once(self) -> list[Evaluation]:
         # The window reaches max_gap past each rule's duration so that a run
         # which started right at the window's edge is still visible as one.
-        series = self._store.rule_series(since=self._clock() - self._max_age, padding=self._max_gap)
+        now = self._clock()
+        series = self._store.rule_series(since=now - self._max_age, padding=self._max_gap)
         evaluations = evaluate(series, self._max_gap)
-        self._handle(evaluations)
+        self._handle(evaluations, now)
         return evaluations
 
     def start(self) -> None:
@@ -140,55 +147,153 @@ class RuleEvaluator:
             self._stop.wait(self._interval)
 
 
-class BreachLogger:
-    """Logs when a series' verdict changes: OK, breaching, or sustained.
+def plan_transitions(open_alerts: list[Alert], evaluations: list[Evaluation], now: float) -> list[AlertChange]:
+    """The alert state machine: what to do with each open alert and series.
 
-    A stand-in handler until the alert state machine (ALERT-04) consumes
-    evaluations instead. Logs changes only, not every cycle.
+    - no alert + breaching: open one, `pending`, or straight to `firing` if
+      it's already sustained (e.g. duration_seconds = 0).
+    - `pending` + sustained: `firing`.
+    - `pending` + no longer breaching, or not evaluated: deleted
+      ("cancelled"); it never fired, so it isn't history.
+    - `firing` + still breaching: stays `firing`, even if the run restarted.
+      The duration only gates pending -> firing, so a brief dip can't make a
+      firing alert flap between resolved and firing.
+    - `firing` + no longer breaching: `resolved` as `recovered`.
+    - `firing` + not evaluated this cycle (series stopped reporting, or the
+      rule was disabled, changed, or deleted): `resolved` as `not_evaluated`.
+
+    Every open alert that stays open is refreshed ("updated") with the
+    latest value and the rule's current condition.
+    """
+    # An alert whose rule was deleted (rule_id NULL) can't match any
+    # evaluation, and several such alerts could share a series key, so they
+    # are kept out of the lookup and closed below.
+    remaining = {
+        _series_key(a.rule_id, a.hostname, a.unit, a.tags): a for a in open_alerts if a.rule_id is not None
+    }
+    orphaned = [a for a in open_alerts if a.rule_id is None]
+    changes: list[AlertChange] = []
+
+    for e in evaluations:
+        alert = remaining.pop(e.series_key, None)
+        change = _step(alert, e, now)
+        if change is not None:
+            changes.append(change)
+
+    for alert in [*remaining.values(), *orphaned]:
+        if alert.state == "pending":
+            changes.append(AlertChange("cancelled", alert, None))
+        else:
+            resolved = replace(
+                alert, state="resolved", resolved_at=now, resolve_reason="not_evaluated", last_evaluated_at=now
+            )
+            changes.append(AlertChange("resolved", alert, resolved))
+    return changes
+
+
+def _step(alert: Alert | None, e: Evaluation, now: float) -> AlertChange | None:
+    if alert is None:
+        if e.sustained:
+            return AlertChange("fired", None, _new_alert(e, now, "firing"))
+        if e.breaching:
+            return AlertChange("pending", None, _new_alert(e, now, "pending"))
+        return None
+
+    if alert.state == "pending":
+        if e.sustained:
+            return AlertChange("fired", alert, _refresh(alert, e, now, state="firing", fired_at=now))
+        if e.breaching:
+            return AlertChange("updated", alert, _refresh(alert, e, now, pending_since=e.breaching_since))
+        return AlertChange("cancelled", alert, None)
+
+    # firing
+    if e.breaching:
+        return AlertChange("updated", alert, _refresh(alert, e, now))
+    return AlertChange(
+        "resolved", alert, _refresh(alert, e, now, state="resolved", resolved_at=now, resolve_reason="recovered")
+    )
+
+
+def _new_alert(e: Evaluation, now: float, state: str) -> Alert:
+    s = e.series
+    return Alert(
+        id=None,
+        rule_id=s.rule_id,
+        host_id=s.host_id,
+        hostname=s.hostname,
+        unit=s.unit,
+        tags=s.tags,
+        rule_name=s.rule_name,
+        metric_name=s.metric_name,
+        operator=s.operator,
+        threshold=s.threshold,
+        duration_seconds=s.duration_seconds,
+        state=state,
+        pending_since=e.breaching_since,
+        last_value=s.points[-1].value,
+        last_evaluated_at=now,
+        fired_at=now if state == "firing" else None,
+    )
+
+
+def _refresh(alert: Alert, e: Evaluation, now: float, **changes) -> Alert:
+    s = e.series
+    return replace(
+        alert,
+        rule_name=s.rule_name,
+        metric_name=s.metric_name,
+        operator=s.operator,
+        threshold=s.threshold,
+        duration_seconds=s.duration_seconds,
+        last_value=s.points[-1].value,
+        last_evaluated_at=now,
+        **changes,
+    )
+
+
+class AlertTracker:
+    """The evaluator's handler: runs the state machine and persists it.
+
+    Open alerts live in Postgres, not memory, so an API restart picks up
+    where it left off instead of re-firing everything.
     """
 
-    def __init__(self) -> None:
-        self._status: dict[SeriesKey, tuple[str, Evaluation]] = {}
+    def __init__(self, store: AlertStore) -> None:
+        self._store = store
 
-    def __call__(self, evaluations: list[Evaluation]) -> None:
-        current = {e.series_key: (_status(e), e) for e in evaluations}
-
-        for key, (status, e) in current.items():
-            previous = self._status.get(key, ("ok", None))[0]
-            if status == previous:
-                continue
-            d = e.series.duration_seconds
-            if status == "sustained":
-                logger.info("Rule breach sustained for %ss: %s", d, _describe(e))
-            elif status == "breaching" and previous == "ok":
-                logger.info("Rule breaching, pending until sustained for %ss: %s", d, _describe(e))
-            elif status == "breaching":
-                # sustained -> breaching only happens if the rule's duration
-                # was raised mid-breach; report it rather than stay silent.
-                logger.info("Rule breach no longer sustained for %ss: %s", d, _describe(e))
-            else:
-                logger.info("Rule no longer breaching: %s", _describe(e))
-        for key, (status, e) in self._status.items():
-            if key not in current and status != "ok":
-                logger.info(
-                    "Rule no longer evaluated (no recent samples, or rule disabled/changed): %s",
-                    _describe(e),
-                )
-        self._status = current
+    def __call__(self, evaluations: list[Evaluation], now: float) -> list[AlertChange]:
+        changes = plan_transitions(self._store.open_alerts(), evaluations, now)
+        if not changes:
+            return []
+        applied = self._store.apply_alert_changes(changes)
+        for change in applied:
+            _log_change(change)
+        return applied
 
 
-def _status(e: Evaluation) -> str:
-    if e.sustained:
-        return "sustained"
-    return "breaching" if e.breaching else "ok"
+def _log_change(change: AlertChange) -> None:
+    if change.kind == "pending":
+        a = change.after
+        logger.info("Alert %d pending, fires if sustained for %ss: %s", a.id, a.duration_seconds, _describe(a))
+    elif change.kind == "fired":
+        a = change.after
+        logger.warning("Alert %d FIRING: %s", a.id, _describe(a))
+    elif change.kind == "resolved":
+        a = change.after
+        logger.info(
+            "Alert %d resolved (%s) after %ss firing: %s",
+            a.id, a.resolve_reason, f"{a.resolved_at - a.fired_at:g}", _describe(a),
+        )
+    elif change.kind == "cancelled":
+        a = change.before
+        logger.info("Alert %d cancelled, recovered before firing: %s", a.id, _describe(a))
 
 
-def _describe(e: Evaluation) -> str:
-    s = e.series
-    latest = s.points[-1]
-    tags = ",".join(f"{k}={v}" for k, v in sorted(s.tags.items()))
-    series = f"{s.metric_name}{{{tags}}}" if tags else s.metric_name
+def _describe(a: Alert) -> str:
+    tags = ",".join(f"{k}={v}" for k, v in sorted(a.tags.items()))
+    series = f"{a.metric_name}{{{tags}}}" if tags else a.metric_name
+    rule = f"#{a.rule_id}" if a.rule_id is not None else "(deleted rule)"
     return (
-        f"#{s.rule_id} {s.rule_name!r} on {s.hostname}: "
-        f"{series} = {latest.value:g} {s.unit} ({s.operator} {s.threshold:g})"
+        f"{rule} {a.rule_name!r} on {a.hostname}: "
+        f"{series} = {a.last_value:g} {a.unit} ({a.operator} {a.threshold:g})"
     )

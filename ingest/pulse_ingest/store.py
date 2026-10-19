@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Literal, Protocol
 
 from psycopg.types.json import Jsonb
@@ -130,7 +130,7 @@ WITH matched AS (
 )
 SELECT
     x.rule_id, x.rule_name, x.metric_name, x.operator, x.threshold, x.duration_seconds,
-    h.hostname, m.unit, x.tags, extract(epoch FROM x.ts), x.value
+    x.host_id, h.hostname, m.unit, x.tags, extract(epoch FROM x.ts), x.value
 FROM matched x
 JOIN hosts h ON h.id = x.host_id
 JOIN metrics m ON m.id = x.metric_id
@@ -138,6 +138,46 @@ WHERE x.latest_ts >= to_timestamp(%(since)s)
   AND x.ts >= x.latest_ts - (x.duration_seconds + %(padding)s) * interval '1 second'
 ORDER BY x.rule_id, x.host_id, x.metric_id, x.tags, x.ts
 """
+
+_OPEN_ALERTS = """
+SELECT
+    a.id, a.rule_id, a.host_id, h.hostname, a.unit, a.tags,
+    a.rule_name, a.metric_name, a.operator, a.threshold, a.duration_seconds,
+    a.state, extract(epoch FROM a.pending_since), extract(epoch FROM a.fired_at),
+    extract(epoch FROM a.resolved_at), a.resolve_reason, a.last_value,
+    extract(epoch FROM a.last_evaluated_at)
+FROM alerts a
+JOIN hosts h ON h.id = a.host_id
+WHERE a.state <> 'resolved'
+ORDER BY a.id
+"""
+
+_INSERT_ALERT = """
+INSERT INTO alerts (
+    rule_id, host_id, unit, tags, rule_name, metric_name, operator, threshold,
+    duration_seconds, state, pending_since, fired_at, resolved_at, resolve_reason,
+    last_value, last_evaluated_at
+) VALUES (
+    %(rule_id)s, %(host_id)s, %(unit)s, %(tags)s, %(rule_name)s, %(metric_name)s,
+    %(operator)s, %(threshold)s, %(duration_seconds)s, %(state)s,
+    to_timestamp(%(pending_since)s), to_timestamp(%(fired_at)s), to_timestamp(%(resolved_at)s),
+    %(resolve_reason)s, %(last_value)s, to_timestamp(%(last_evaluated_at)s)
+)
+RETURNING id
+"""
+
+# The series identity (rule, host, unit, tags) never changes on an update.
+_UPDATE_ALERT = """
+UPDATE alerts SET
+    rule_name = %(rule_name)s, metric_name = %(metric_name)s, operator = %(operator)s,
+    threshold = %(threshold)s, duration_seconds = %(duration_seconds)s, state = %(state)s,
+    pending_since = to_timestamp(%(pending_since)s), fired_at = to_timestamp(%(fired_at)s),
+    resolved_at = to_timestamp(%(resolved_at)s), resolve_reason = %(resolve_reason)s,
+    last_value = %(last_value)s, last_evaluated_at = to_timestamp(%(last_evaluated_at)s)
+WHERE id = %(id)s
+"""
+
+_DELETE_ALERT = "DELETE FROM alerts WHERE id = %s"
 
 
 @dataclass(frozen=True)
@@ -188,10 +228,49 @@ class RuleSeries:
     operator: str
     threshold: float
     duration_seconds: int
+    host_id: int
     hostname: str
     unit: str
     tags: dict[str, str]
     points: list[HistoryPoint] = field(default_factory=list)
+
+
+AlertState = Literal["pending", "firing", "resolved"]
+ResolveReason = Literal["recovered", "not_evaluated"]
+
+
+@dataclass(frozen=True)
+class Alert:
+    """One row of `alerts`. `id` is None until it has been inserted."""
+
+    id: int | None
+    rule_id: int | None
+    host_id: int
+    hostname: str
+    unit: str
+    tags: dict[str, str]
+    rule_name: str
+    metric_name: str
+    operator: str
+    threshold: float
+    duration_seconds: int
+    state: AlertState
+    pending_since: float
+    last_value: float
+    last_evaluated_at: float
+    fired_at: float | None = None
+    resolved_at: float | None = None
+    resolve_reason: ResolveReason | None = None
+
+
+@dataclass(frozen=True)
+class AlertChange:
+    """One alert transition to persist: `before` None inserts `after`,
+    `after` None deletes `before`, and both present updates it."""
+
+    kind: str
+    before: Alert | None
+    after: Alert | None
 
 
 class MetricStore(Protocol):
@@ -227,6 +306,13 @@ class AlertStore(Protocol):
         is at or after `since`, with its samples from `duration_seconds +
         padding` before that latest sample onward. Series with nothing that
         recent are omitted."""
+
+    def open_alerts(self) -> list[Alert]:
+        """Every pending or firing alert."""
+
+    def apply_alert_changes(self, changes: list[AlertChange]) -> list[AlertChange]:
+        """Persist the changes in one transaction. Returns them with inserted
+        alerts' new ids filled in."""
 
 
 class PostgresMetricStore:
@@ -328,7 +414,7 @@ class PostgresMetricStore:
         # Rows arrive grouped by series (the ORDER BY), so a new series starts
         # whenever the key changes.
         result: list[RuleSeries] = []
-        for rule_id, rule_name, metric_name, op, threshold, duration, hostname, unit, tags, ts, value in rows:
+        for rule_id, rule_name, metric_name, op, threshold, duration, host_id, hostname, unit, tags, ts, value in rows:
             current = result[-1] if result else None
             if current is None or (current.rule_id, current.hostname, current.unit, current.tags) != (
                 rule_id, hostname, unit, tags
@@ -340,6 +426,7 @@ class PostgresMetricStore:
                     operator=op,
                     threshold=threshold,
                     duration_seconds=duration,
+                    host_id=host_id,
                     hostname=hostname,
                     unit=unit,
                     tags=tags,
@@ -347,3 +434,74 @@ class PostgresMetricStore:
                 result.append(current)
             current.points.append(HistoryPoint(timestamp=float(ts), value=value))
         return result
+
+    def open_alerts(self) -> list[Alert]:
+        with self._pool.connection() as conn:
+            rows = conn.execute(_OPEN_ALERTS).fetchall()
+        return [
+            Alert(
+                id=alert_id,
+                rule_id=rule_id,
+                host_id=host_id,
+                hostname=hostname,
+                unit=unit,
+                tags=tags,
+                rule_name=rule_name,
+                metric_name=metric_name,
+                operator=op,
+                threshold=threshold,
+                duration_seconds=duration,
+                state=state,
+                pending_since=float(pending_since),
+                fired_at=_epoch(fired_at),
+                resolved_at=_epoch(resolved_at),
+                resolve_reason=reason,
+                last_value=last_value,
+                last_evaluated_at=float(evaluated_at),
+            )
+            for (
+                alert_id, rule_id, host_id, hostname, unit, tags, rule_name, metric_name, op,
+                threshold, duration, state, pending_since, fired_at, resolved_at, reason,
+                last_value, evaluated_at,
+            ) in rows
+        ]
+
+    def apply_alert_changes(self, changes: list[AlertChange]) -> list[AlertChange]:
+        applied: list[AlertChange] = []
+        with self._pool.connection() as conn, conn.transaction():
+            for change in changes:
+                if change.after is None:
+                    conn.execute(_DELETE_ALERT, (change.before.id,))
+                elif change.before is None:
+                    (alert_id,) = conn.execute(_INSERT_ALERT, _alert_params(change.after)).fetchone()
+                    change = replace(change, after=replace(change.after, id=alert_id))
+                else:
+                    conn.execute(_UPDATE_ALERT, _alert_params(change.after))
+                applied.append(change)
+        return applied
+
+
+def _epoch(value) -> float | None:
+    return None if value is None else float(value)
+
+
+def _alert_params(a: Alert) -> dict:
+    return {
+        "id": a.id,
+        "rule_id": a.rule_id,
+        "host_id": a.host_id,
+        "unit": a.unit,
+        "tags": Jsonb(a.tags),
+        "rule_name": a.rule_name,
+        "metric_name": a.metric_name,
+        "operator": a.operator,
+        "threshold": a.threshold,
+        "duration_seconds": a.duration_seconds,
+        "state": a.state,
+        "pending_since": a.pending_since,
+        "fired_at": a.fired_at,
+        "resolved_at": a.resolved_at,
+        "resolve_reason": a.resolve_reason,
+        "last_value": a.last_value,
+        "last_evaluated_at": a.last_evaluated_at,
+    }

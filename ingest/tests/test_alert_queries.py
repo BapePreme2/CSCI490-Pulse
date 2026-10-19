@@ -72,6 +72,8 @@ def test_series_carries_the_rule_and_series_details(store, db_url):
         rule_id, "rule", "cpu.usage", ">", 85.0, 120
     )
     assert (s.hostname, s.unit, s.tags) == ("web-1", "percent", {"environment": "dev"})
+    with psycopg.connect(db_url) as conn:
+        assert s.host_id == conn.execute("SELECT id FROM hosts WHERE hostname = 'web-1'").fetchone()[0]
     assert [(p.timestamp, p.value) for p in s.points] == [(TS, 91.5)]
 
 

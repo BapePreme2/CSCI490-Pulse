@@ -13,7 +13,7 @@ from fastapi.responses import JSONResponse
 from psycopg_pool import PoolTimeout
 
 from pulse_ingest import __version__
-from pulse_ingest.alerts import DEFAULT_INTERVAL_SECONDS, BreachLogger, RuleEvaluator
+from pulse_ingest.alerts import DEFAULT_INTERVAL_SECONDS, AlertTracker, RuleEvaluator
 from pulse_ingest.auth import extract_bearer_token, is_valid_key, load_api_keys
 from pulse_ingest.migrate import database_url
 from pulse_ingest.schemas import MetricBatch
@@ -61,7 +61,7 @@ def create_app(
     # a real deployment; API tests that inject a fake store don't start it.
     # Run a single API process: each one would evaluate every rule.
     evaluator = (
-        RuleEvaluator(owned_store, BreachLogger(), interval=_alert_interval()) if owned_store else None
+        RuleEvaluator(owned_store, AlertTracker(owned_store), interval=_alert_interval()) if owned_store else None
     )
 
     @asynccontextmanager

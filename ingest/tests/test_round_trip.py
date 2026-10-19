@@ -192,10 +192,10 @@ def test_wrong_api_key_stores_nothing_and_agent_keeps_retrying(db_url, procs, tm
     assert "check api_key" in (tmp_path / "agent-not-the-key.log").read_text()
 
 
-def test_running_api_evaluates_alert_rules_against_live_agent_data(db_url, procs, tmp_path):
+def test_running_api_raises_an_alert_from_live_agent_data(db_url, procs, tmp_path):
     # memory.total > 0 is always true, so with the agent reporting every
-    # second the rule should go pending on the first sample, then sustained
-    # once 3 seconds of breaching samples have landed.
+    # second the rule should open a pending alert on the first sample, then
+    # fire it once 3 seconds of breaching samples have landed.
     query(
         db_url,
         "INSERT INTO alert_rules (name, metric_name, operator, threshold, duration_seconds) "
@@ -206,10 +206,16 @@ def test_running_api_evaluates_alert_rules_against_live_agent_data(db_url, procs
     start_agent(port, API_KEY, procs, tmp_path)
     api_log = tmp_path / f"api-{port}.log"
 
-    sustained = wait_for(lambda: "Rule breach sustained" in api_log.read_text(), timeout=20)
+    fired = wait_for(lambda: "FIRING" in api_log.read_text(), timeout=20)
 
-    assert sustained, "evaluator never reported the rule sustained\n" + logs(tmp_path)
-    lines = [l for l in api_log.read_text().splitlines() if "Rule " in l]
+    assert fired, "alert never fired\n" + logs(tmp_path)
+    lines = [l for l in api_log.read_text().splitlines() if "Alert " in l]
     series = f"'always' on {HOST}: memory.total{{environment=e2e}}"
-    assert "Rule breaching, pending until sustained for 3s" in lines[0] and series in lines[0], lines
-    assert "Rule breach sustained for 3s" in lines[1] and series in lines[1], lines
+    assert "Alert 1 pending, fires if sustained for 3s" in lines[0] and series in lines[0], lines
+    assert "Alert 1 FIRING" in lines[1] and series in lines[1], lines
+
+    ((state, held, tags),) = query(
+        db_url, "SELECT state, extract(epoch FROM fired_at - pending_since), tags FROM alerts"
+    )
+    assert (state, tags) == ("firing", {"environment": "e2e"})
+    assert float(held) >= 3

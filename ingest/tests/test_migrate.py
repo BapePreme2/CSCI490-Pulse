@@ -18,7 +18,7 @@ def test_migrations_create_expected_tables(scratch_db_url):
                 "SELECT table_name FROM information_schema.tables WHERE table_schema = 'public'"
             )
         }
-    assert {"hosts", "metrics", "metric_values", "alert_rules", "schema_migrations"} <= tables
+    assert {"hosts", "metrics", "metric_values", "alert_rules", "alerts", "schema_migrations"} <= tables
 
 
 def test_migrations_create_the_hosts_last_seen_index(scratch_db_url):
@@ -188,3 +188,88 @@ def test_tag_filter_null_means_absent_is_expressible_in_sql(scratch_db_url):
         assert matches(overall, '{"core": null}') and not matches(core0, '{"core": null}')
         assert matches(core0, '{"core": "0"}') and not matches(overall, '{"core": "0"}')
         assert not matches(core0, '{"core": "1"}')
+
+
+def _insert_alert(conn, rule_id, host_id, state="firing", tags="{}", **overrides):
+    row = {
+        "rule_id": rule_id,
+        "host_id": host_id,
+        "tags": tags,
+        "state": state,
+        "fired": state != "pending",
+        "resolved": state == "resolved",
+        "reason": "recovered" if state == "resolved" else None,
+    }
+    row.update(overrides)
+    return conn.execute(
+        "INSERT INTO alerts (rule_id, host_id, unit, tags, rule_name, metric_name, operator, threshold, "
+        "duration_seconds, state, pending_since, fired_at, resolved_at, resolve_reason, last_value, "
+        "last_evaluated_at) VALUES (%(rule_id)s, %(host_id)s, 'percent', %(tags)s::jsonb, 'High CPU', "
+        "'cpu.usage', '>', 80, 300, %(state)s, now(), CASE WHEN %(fired)s THEN now() END, "
+        "CASE WHEN %(resolved)s THEN now() END, %(reason)s, 95, now()) RETURNING id",
+        row,
+    ).fetchone()[0]
+
+
+@pytest.mark.parametrize(
+    "state, overrides",
+    [
+        ("pending", {"fired": True}),
+        ("pending", {"reason": "recovered"}),
+        ("firing", {"fired": False}),
+        ("firing", {"resolved": True}),
+        ("resolved", {"resolved": False}),
+        ("resolved", {"reason": None}),
+        ("resolved", {"fired": False}),
+        ("resolved", {"reason": "fixed"}),
+        ("cancelled", {}),
+    ],
+)
+def test_alert_state_and_timestamps_must_agree(scratch_db_url, state, overrides):
+    apply_migrations(scratch_db_url)
+
+    with psycopg.connect(scratch_db_url) as conn:
+        host_id, _ = _seed(conn)
+        rule_id = _insert_rule(conn)
+        with pytest.raises(psycopg.errors.CheckViolation):
+            _insert_alert(conn, rule_id, host_id, state, **overrides)
+
+
+def test_only_one_open_alert_per_rule_and_series(scratch_db_url):
+    apply_migrations(scratch_db_url)
+
+    with psycopg.connect(scratch_db_url) as conn:
+        host_id, _ = _seed(conn)
+        rule_id = _insert_rule(conn)
+        _insert_alert(conn, rule_id, host_id, "resolved")
+        _insert_alert(conn, rule_id, host_id, "resolved")
+        _insert_alert(conn, rule_id, host_id, "firing")
+        _insert_alert(conn, rule_id, host_id, "pending", tags='{"core": "0"}')
+
+        with pytest.raises(psycopg.errors.UniqueViolation):
+            _insert_alert(conn, rule_id, host_id, "pending")
+
+
+def test_deleting_a_rule_keeps_its_alerts(scratch_db_url):
+    apply_migrations(scratch_db_url)
+
+    with psycopg.connect(scratch_db_url) as conn:
+        host_id, _ = _seed(conn)
+        rule_id = _insert_rule(conn)
+        alert_id = _insert_alert(conn, rule_id, host_id, "resolved")
+        conn.execute("DELETE FROM alert_rules WHERE id = %s", (rule_id,))
+
+        assert conn.execute("SELECT rule_id, rule_name FROM alerts WHERE id = %s", (alert_id,)).fetchone() == (
+            None, "High CPU"
+        )
+
+
+def test_deleting_a_host_removes_its_alerts(scratch_db_url):
+    apply_migrations(scratch_db_url)
+
+    with psycopg.connect(scratch_db_url) as conn:
+        host_id, _ = _seed(conn)
+        _insert_alert(conn, _insert_rule(conn), host_id, "firing")
+        conn.execute("DELETE FROM hosts WHERE id = %s", (host_id,))
+
+        assert conn.execute("SELECT count(*) FROM alerts").fetchone()[0] == 0

@@ -343,14 +343,9 @@ interval). Each cycle:
    `Evaluation` with three facts: `breaching` (the latest sample is past the
    threshold), `sustained` (it has stayed past it for the rule's full
    `duration_seconds`), and `breaching_since` (when the current run began).
-3. The evaluations go to a handler. For now that's `BreachLogger`, which
-   logs at INFO when a series' verdict changes (not every cycle):
-
-```
-INFO pulse_ingest.alerts: Rule breaching, pending until sustained for 300s: #1 'High CPU' on web-1: cpu.usage{core=0} = 93.5 percent (> 80)
-INFO pulse_ingest.alerts: Rule breach sustained for 300s: #1 'High CPU' on web-1: cpu.usage{core=0} = 95 percent (> 80)
-INFO pulse_ingest.alerts: Rule no longer breaching: #1 'High CPU' on web-1: cpu.usage{core=0} = 41 percent (> 80)
-```
+3. The evaluations go to the alert state machine (`AlertTracker`, see
+   [Alerts](#alerts-state-machine) below), which opens, fires, and resolves
+   alerts in Postgres.
 
 **Sustained duration (ALERT-03).** Walking back from the latest sample, a
 series' current run is the unbroken stretch of samples that all breach. It
@@ -381,11 +376,6 @@ sample is within the last 30s. Without that, a host that died mid-spike
 would be judged on its last value forever. A series with no recent sample is
 left out of the cycle entirely, so it is neither breaching nor OK.
 
-What this doesn't do yet: nothing fires, resolves, or notifies. That's the
-state machine (ALERT-04), which will use `sustained` for Firing and
-`breaching` without `sustained` for Pending, and replace `BreachLogger` as
-the handler.
-
 Operational notes:
 
 - If the database is unreachable, the cycle logs a one-line warning and the
@@ -394,19 +384,77 @@ Operational notes:
 - The evaluator only starts when the app owns its Postgres store, i.e. a
   real `uvicorn` run, not API tests that inject a fake store.
 - Run **one** API process. Each process runs its own evaluator, so
-  `uvicorn --workers 4` would evaluate (and, after ALERT-04, notify) every
-  rule four times.
+  `uvicorn --workers 4` would evaluate every rule four times. The unique
+  index on open alerts stops duplicate alert rows, but two evaluators can
+  still both load the same pending alert and both fire it, so the
+  transition would be logged (and, once NOTIFY-01 exists, notified) twice.
 - Shutdown interrupts the wait between cycles, so stopping the API doesn't
   hang for up to a full interval.
 
 There's no API for rules yet (that's ALERT-05), so to try it, add one in
-SQL and watch the API log:
+SQL and watch the API log (and the `alerts` table):
 
 ```bash
 docker exec -it pulse-postgres psql -U pulse -d pulse -c "
   INSERT INTO alert_rules (name, metric_name, operator, threshold, duration_seconds, tag_filter)
   VALUES ('High overall CPU', 'cpu.usage', '>', 50, 0, '{\"core\": null}')"
 ```
+
+## Alerts (state machine)
+
+Each (rule, series) pair moves through **OK → Pending → Firing →
+Resolved**, stored in the `alerts` table (`migrations/004_alerts.sql`) by
+`AlertTracker` in `pulse_ingest/alerts.py`. The decisions themselves are a
+pure function, `plan_transitions(open_alerts, evaluations, now)`, so every
+transition is unit-tested without a database.
+
+| Open alert | This cycle's evaluation | Result |
+| --- | --- | --- |
+| none | breaching, not sustained | new alert, **pending** |
+| none | sustained (e.g. `duration_seconds` = 0) | new alert, straight to **firing** |
+| pending | still breaching | stays pending; `pending_since` follows the current run |
+| pending | sustained | **firing**, `fired_at` = now |
+| pending | not breaching, or not evaluated | **deleted** (cancelled before firing) |
+| firing | still breaching (sustained or not) | stays firing |
+| firing | not breaching | **resolved**, `resolve_reason = 'recovered'` |
+| firing | not evaluated | **resolved**, `resolve_reason = 'not_evaluated'` |
+
+The API log shows each transition:
+
+```
+INFO    Alert 12 pending, fires if sustained for 300s: #1 'High CPU' on web-1: cpu.usage{core=0} = 93.5 percent (> 80)
+WARNING Alert 12 FIRING: #1 'High CPU' on web-1: cpu.usage{core=0} = 95 percent (> 80)
+INFO    Alert 12 resolved (recovered) after 420s firing: #1 'High CPU' on web-1: cpu.usage{core=0} = 41 percent (> 80)
+```
+
+Design decisions:
+
+- **State lives in Postgres, not memory.** An API restart picks up the open
+  alerts where they were instead of re-firing everything (which would mean
+  duplicate notifications once NOTIFY-01 exists). A partial unique index
+  allows at most one open alert per rule and series, and each cycle's
+  changes are written in one transaction.
+- **A pending alert that recovers is deleted, not resolved.** It never
+  fired, so it isn't history. Every resolved row is an alert that actually
+  fired, which is what the alert history page (DASH-09) lists.
+- **Once firing, it stays firing while the latest sample breaches,** even if
+  the run restarted after a dip between cycles. `duration_seconds` only
+  gates pending → firing (the same as Prometheus's `for:`), so an alert
+  can't flap between resolved and firing on a noisy series.
+- **"Not evaluated" is not "recovered."** If a firing series disappears
+  from the evaluation (the host stopped reporting, or the rule was disabled,
+  edited to no longer match, or deleted), the alert resolves with
+  `not_evaluated`. Claiming the CPU recovered when the host simply went
+  dark would be wrong; the reason lets a notification say which it was.
+- **Deleting a rule keeps its alerts.** `alerts.rule_id` is
+  `ON DELETE SET NULL`, and each alert keeps a copy of the rule's name and
+  condition, refreshed on every cycle while it's open, so the history reads
+  correctly after the rule is edited or deleted. Open alerts whose rule was
+  deleted resolve (or cancel) on the next cycle. Deleting a host deletes its
+  alerts along with its samples.
+- **Times:** `pending_since` is the start of the breaching run (sample
+  time, the agent's clock); `fired_at` and `resolved_at` are when the
+  evaluator decided (the API server's clock).
 
 ## Migrations
 
@@ -453,3 +501,4 @@ half-applied. To add one, create the next numbered file, e.g.
 | ALERT-01 alert rule schema | `migrations/003_alert_rules.sql`, `pulse_ingest/schemas.py` (`AlertRuleIn`), `tests/test_schemas.py`, `tests/test_migrate.py` |
 | ALERT-02 rule evaluation loop | `pulse_ingest/alerts.py`, `pulse_ingest/store.py` (`rule_series`), `pulse_ingest/app.py` (lifespan), `tests/test_alerts.py`, `tests/test_alert_queries.py`, `tests/test_round_trip.py` |
 | ALERT-03 sustained duration via sliding window | `pulse_ingest/alerts.py` (`evaluate`), `pulse_ingest/store.py` (`rule_series` window), `tests/test_alerts.py`, `tests/test_alert_queries.py`, `tests/test_round_trip.py` |
+| ALERT-04 alert state machine | `migrations/004_alerts.sql`, `pulse_ingest/alerts.py` (`plan_transitions`, `AlertTracker`), `pulse_ingest/store.py` (`open_alerts`, `apply_alert_changes`), `tests/test_alerts.py`, `tests/test_alert_store.py`, `tests/test_migrate.py`, `tests/test_round_trip.py` |
