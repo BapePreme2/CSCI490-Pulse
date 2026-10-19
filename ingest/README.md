@@ -275,6 +275,59 @@ multi-host support introduces: listing hosts most-recently-active first
 (`list_hosts()`, Week 6) and detecting stale/offline hosts by
 `last_seen_at` (FLEET-04, later in Week 6).
 
+## Alert rules
+
+A rule reads as "`metric_name` `operator` `threshold` for
+`duration_seconds`", e.g. `cpu.usage > 80` for 300 seconds. It is stored in
+`alert_rules` (`migrations/003_alert_rules.sql`) and validated on the way in
+by `AlertRuleIn` (`pulse_ingest/schemas.py`).
+
+```json
+{
+  "name": "High overall CPU",
+  "metric_name": "cpu.usage",
+  "operator": ">",
+  "threshold": 80,
+  "duration_seconds": 300,
+  "host": null,
+  "tag_filter": {"core": null},
+  "enabled": true
+}
+```
+
+| Field | Meaning |
+| --- | --- |
+| `metric_name` | A metric name as the agent reports it. Not checked against `metrics`, so a rule can exist before any host reports that metric. |
+| `operator` | One of `>`, `>=`, `<`, `<=`. No `==`: exact equality on sampled floats is almost never what a rule means. |
+| `threshold` | Compared against the stored value in the metric's own unit (`percent` for `cpu.usage`, `GB` for `disk.free`). Must be finite. |
+| `duration_seconds` | How long the condition must hold before the rule fires. `0` fires on the first breaching sample. 0-86400. |
+| `host` | A hostname, or `null` for fleet-wide. Stored as `host_id`, so deleting a host deletes its own rules but not fleet-wide ones. |
+| `tag_filter` | Narrows which series the rule watches (see below). Defaults to `{}`, every series of that metric. |
+
+**Each series is evaluated on its own.** A rule watches every series
+(host + tag set) that matches it, and each one can be OK or firing
+independently. `cpu.usage > 80` fleet-wide with no filter therefore watches
+every host's overall CPU *and* every one of its per-core series.
+
+**`tag_filter`:** a string value requires that tag to equal it
+(`{"mount": "/"}` watches only the root disk), and `null` requires the tag
+to be **absent**. `{"core": null}` is how a rule targets overall CPU only.
+That's the same distinction FLEET-03 and DASH-04 each got wrong once: the
+overall reading is the one *without* a `core` tag, not the one with no tags
+at all, since `environment` lands on every metric. An exact-match or
+"contains" filter couldn't express it. A filter on `host` is rejected,
+because the write path strips that tag before storing, so the filter could
+never match. The `host` field does that job instead.
+
+In SQL, a series' `tags` match a rule when
+`tags @> jsonb_strip_nulls(tag_filter)` and `tags` has none of the keys
+whose filter value is `null` (`tests/test_migrate.py` checks this
+expression against Postgres).
+
+The database repeats the important checks as constraints (operator set,
+finite threshold, duration range, `tag_filter` is a JSON object), so a bad
+row can't get in through some path other than the API.
+
 ## Migrations
 
 `python -m pulse_ingest.migrate` applies each un-applied `migrations/*.sql`
@@ -312,3 +365,9 @@ half-applied. To add one, create the next numbered file, e.g.
 | FLEET-03 fleet overview endpoint | `pulse_ingest/store.py` (`list_hosts` key metrics), `pulse_ingest/app.py` (`GET /hosts`), `tests/test_queries.py`, `tests/test_dashboard_endpoints.py` |
 | FLEET-04 heartbeat/stale detection | `pulse_ingest/store.py` (`STALE_AFTER_SECONDS`, `HostSummary.status`), `tests/test_queries.py`, `tests/test_dashboard_endpoints.py` |
 | FLEET-05 per-host detail endpoint | `pulse_ingest/store.py` (`get_host_summary`), `pulse_ingest/app.py` (`GET /hosts/{host}`), `tests/test_queries.py`, `tests/test_dashboard_endpoints.py` |
+
+## Task mapping (Week 7)
+
+| Task | File(s) |
+| --- | --- |
+| ALERT-01 alert rule schema | `migrations/003_alert_rules.sql`, `pulse_ingest/schemas.py` (`AlertRuleIn`), `tests/test_schemas.py`, `tests/test_migrate.py` |
