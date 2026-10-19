@@ -252,14 +252,16 @@ def _refresh(alert: Alert, e: Evaluation, now: float, **changes) -> Alert:
 
 
 class AlertTracker:
-    """The evaluator's handler: runs the state machine and persists it.
+    """The evaluator's handler: runs the state machine, persists it, and
+    passes each stored change to `notify` (see notify.Notifier).
 
     Open alerts live in Postgres, not memory, so an API restart picks up
     where it left off instead of re-firing everything.
     """
 
-    def __init__(self, store: AlertStore) -> None:
+    def __init__(self, store: AlertStore, notify: Callable[[AlertChange], object] | None = None) -> None:
         self._store = store
+        self._notify = notify
 
     def __call__(self, evaluations: list[Evaluation], now: float) -> list[AlertChange]:
         changes = plan_transitions(self._store.open_alerts(), evaluations, now)
@@ -268,6 +270,10 @@ class AlertTracker:
         applied = self._store.apply_alert_changes(changes)
         for change in applied:
             _log_change(change)
+            # Only after the changes are committed, so nothing is announced
+            # that didn't happen; the notifier picks which kinds to send.
+            if self._notify is not None:
+                self._notify(change)
         return applied
 
 
@@ -289,11 +295,15 @@ def _log_change(change: AlertChange) -> None:
         logger.info("Alert %d cancelled, recovered before firing: %s", a.id, _describe(a))
 
 
-def _describe(a: Alert) -> str:
+def series_label(a: Alert) -> str:
+    """The alert's series as "cpu.usage{core=0}", or just the metric name."""
     tags = ",".join(f"{k}={v}" for k, v in sorted(a.tags.items()))
-    series = f"{a.metric_name}{{{tags}}}" if tags else a.metric_name
+    return f"{a.metric_name}{{{tags}}}" if tags else a.metric_name
+
+
+def _describe(a: Alert) -> str:
     rule = f"#{a.rule_id}" if a.rule_id is not None else "(deleted rule)"
     return (
         f"{rule} {a.rule_name!r} on {a.hostname}: "
-        f"{series} = {a.last_value:g} {a.unit} ({a.operator} {a.threshold:g})"
+        f"{series_label(a)} = {a.last_value:g} {a.unit} ({a.operator} {a.threshold:g})"
     )

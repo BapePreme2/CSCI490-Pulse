@@ -399,3 +399,30 @@ def test_updates_are_persisted_but_not_logged(caplog):
 
     assert [c.kind for c in changes] == ["updated"]
     assert messages == []
+
+
+def test_tracker_hands_each_change_to_notify_after_it_is_stored():
+    store = FakeAlertTrackerStore([alert("pending", alert_id=2, core="1")])
+    seen = []
+
+    def notify(change):
+        alert_id = (change.after or change.before).id
+        seen.append((change.kind, alert_id, len(store.applied)))
+
+    AlertTracker(store, notify)(evaluate([sustained_series(core="0"), ok_series(core="1")]), LATER)
+
+    # Ids are the stored ones, and the store had already been written to.
+    assert sorted(seen) == [("cancelled", 2, 1), ("fired", 42, 1)]
+
+
+def test_tracker_notifies_nothing_if_storing_fails():
+    class FailingStore(FakeAlertTrackerStore):
+        def apply_alert_changes(self, changes):
+            raise psycopg.OperationalError("connection lost")
+
+    seen = []
+
+    with pytest.raises(psycopg.OperationalError):
+        AlertTracker(FailingStore(), seen.append)(evaluate([sustained_series()]), LATER)
+
+    assert seen == []

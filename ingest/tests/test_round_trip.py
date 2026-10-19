@@ -16,6 +16,7 @@ import psycopg
 import pytest
 
 from pulse_ingest.migrate import apply_migrations
+from pulse_ingest.notify import EMAIL_ENV_VARS
 
 pytestmark = pytest.mark.integration
 
@@ -76,7 +77,9 @@ def spawn(args, log_path, procs, **kwargs):
 
 
 def start_api(db_url, port, procs, tmp_path, **extra_env):
-    env = {**os.environ, "PULSE_DATABASE_URL": db_url, "PULSE_API_KEYS": API_KEY, **extra_env}
+    # Never inherit real mail settings from the shell running the tests.
+    inherited = {k: v for k, v in os.environ.items() if k not in EMAIL_ENV_VARS}
+    env = {**inherited, "PULSE_DATABASE_URL": db_url, "PULSE_API_KEYS": API_KEY, **extra_env}
     spawn(
         [sys.executable, "-m", "uvicorn", "pulse_ingest.app:app",
          "--port", str(port), "--log-level", "warning"],
@@ -192,7 +195,7 @@ def test_wrong_api_key_stores_nothing_and_agent_keeps_retrying(db_url, procs, tm
     assert "check api_key" in (tmp_path / "agent-not-the-key.log").read_text()
 
 
-def test_running_api_raises_an_alert_from_live_agent_data(db_url, procs, tmp_path):
+def test_running_api_raises_an_alert_from_live_agent_data(db_url, procs, tmp_path, smtp_sink):
     # memory.total > 0 is always true, so with the agent reporting every
     # second the rule should open a pending alert on the first sample, then
     # fire it once 3 seconds of breaching samples have landed.
@@ -202,7 +205,15 @@ def test_running_api_raises_an_alert_from_live_agent_data(db_url, procs, tmp_pat
         "VALUES ('always', 'memory.total', '>', 0, 3) RETURNING id",
     )
     port = free_port()
-    start_api(db_url, port, procs, tmp_path, PULSE_ALERT_INTERVAL_SECONDS="0.5")
+    start_api(
+        db_url, port, procs, tmp_path,
+        PULSE_ALERT_INTERVAL_SECONDS="0.5",
+        PULSE_SMTP_HOST="127.0.0.1",
+        PULSE_SMTP_PORT=str(smtp_sink.port),
+        PULSE_SMTP_SECURITY="none",
+        PULSE_ALERT_EMAIL_FROM="pulse@e2e.test",
+        PULSE_ALERT_EMAIL_TO="oncall@e2e.test",
+    )
     start_agent(port, API_KEY, procs, tmp_path)
     api_log = tmp_path / f"api-{port}.log"
 
@@ -219,3 +230,16 @@ def test_running_api_raises_an_alert_from_live_agent_data(db_url, procs, tmp_pat
     )
     assert (state, tags) == ("firing", {"environment": "e2e"})
     assert float(held) >= 3
+
+    # The pending step sends nothing; firing sends one email.
+    assert wait_for(lambda: smtp_sink.envelopes, timeout=10), "no email\n" + logs(tmp_path)
+    (fired_email,) = smtp_sink.messages
+    assert fired_email["Subject"] == f"[Pulse] FIRING: always on {HOST} (environment=e2e)"
+    assert smtp_sink.envelopes[0].rcpt_tos == ["oncall@e2e.test"]
+
+    # Disabling the rule stops its evaluation, which resolves the alert.
+    query(db_url, "UPDATE alert_rules SET enabled = false RETURNING id")
+    assert wait_for(lambda: len(smtp_sink.envelopes) == 2, timeout=10), "no resolve email\n" + logs(tmp_path)
+    resolved_email = smtp_sink.messages[1]
+    assert resolved_email["Subject"] == f"[Pulse] RESOLVED (no longer evaluated): always on {HOST} (environment=e2e)"
+    assert "NOT because the value recovered" in " ".join(resolved_email.get_content().split())

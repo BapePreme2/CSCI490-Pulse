@@ -27,7 +27,11 @@ install -e .`) and skips itself if `agent/.venv` is missing. It checks that:
   recent timestamps, and the configured tags;
 - metrics the agent collects while the API is down are delivered after the
   API starts (the agent's retry buffer, across real processes);
-- a wrong API key stores nothing while the agent keeps retrying.
+- a wrong API key stores nothing while the agent keeps retrying;
+- a rule fires from live agent data, and the API emails the fire and then
+  the resolve to a throwaway local SMTP server. `PULSE_SMTP_*` and
+  `PULSE_ALERT_EMAIL_*` settings in your own shell are ignored, so the
+  tests never email a real inbox.
 
 The database URL defaults to `postgresql://pulse:pulse@localhost:5432/pulse`
 (dev-only credentials); override it with `PULSE_DATABASE_URL`.
@@ -390,7 +394,7 @@ Operational notes:
   `uvicorn --workers 4` would evaluate every rule four times. The unique
   index on open alerts stops duplicate alert rows, but two evaluators can
   still both load the same pending alert and both fire it, so the
-  transition would be logged (and, once NOTIFY-01 exists, notified) twice.
+  transition would be logged and emailed twice.
 - Shutdown interrupts the wait between cycles, so stopping the API doesn't
   hang for up to a full interval.
 
@@ -462,7 +466,7 @@ Design decisions:
 
 - **State lives in Postgres, not memory.** An API restart picks up the open
   alerts where they were instead of re-firing everything (which would mean
-  duplicate notifications once NOTIFY-01 exists). A partial unique index
+  duplicate notifications). A partial unique index
   allows at most one open alert per rule and series, and each cycle's
   changes are written in one transaction.
 - **A pending alert that recovers is deleted, not resolved.** It never
@@ -492,6 +496,83 @@ Design decisions:
   pending step. `memory.used > 1 for 4s` on a host that has reported for a
   minute fires within a second of being saved. That's the condition being
   true, not a shortcut.
+
+## Notifications (NOTIFY-01)
+
+When an alert **fires** or **resolves**, the API emails it (`pulse_ingest/notify.py`).
+Pending and cancelled alerts send nothing, since they never fired. Email is
+off unless configured with these environment variables:
+
+| Variable | Meaning |
+| --- | --- |
+| `PULSE_SMTP_HOST` | SMTP server, e.g. `smtp.gmail.com` (required) |
+| `PULSE_ALERT_EMAIL_FROM` | Sender, e.g. `Pulse <alerts@example.com>` (required) |
+| `PULSE_ALERT_EMAIL_TO` | Recipients, comma-separated (required) |
+| `PULSE_SMTP_SECURITY` | `starttls` (default), `ssl`, or `none` |
+| `PULSE_SMTP_PORT` | Defaults to 587 / 465 / 25 to match the security mode |
+| `PULSE_SMTP_USERNAME`, `PULSE_SMTP_PASSWORD` | Login, if the server needs one (both or neither) |
+
+Setting any of them without all three required ones stops the API at
+startup with a message naming what's missing, rather than running with
+alerts that silently go nowhere. The startup log says whether email is on, and to whom.
+For Gmail, use `smtp.gmail.com` with an
+[app password](https://support.google.com/accounts/answer/185833), not
+the account password.
+
+To try it locally without a real mail account, run a console mail server
+that prints every message it receives (`aiosmtpd` comes with the dev
+dependencies):
+
+```bash
+python -m aiosmtpd -n -l 127.0.0.1:1025      # in one terminal
+PULSE_SMTP_HOST=127.0.0.1 PULSE_SMTP_PORT=1025 PULSE_SMTP_SECURITY=none \
+PULSE_ALERT_EMAIL_FROM=pulse@localhost PULSE_ALERT_EMAIL_TO=me@localhost \
+uvicorn pulse_ingest.app:app                  # in another
+```
+
+A firing email looks like this:
+
+```
+Subject: [Pulse] FIRING: Root disk on web-1 (mount=/)
+
+Root disk is FIRING on web-1.
+
+  Series:          disk.usage{mount=/}
+  Value:           93.1 percent
+  Condition:       disk.usage > 90 for 5m
+  Breaching since: 2026-10-19 21:15:02 UTC
+  Fired at:        2026-10-19 21:20:04 UTC
+
+Alert #2, rule #4.
+```
+
+The resolve email adds `Resolved at` and `Firing for`. Its subject depends
+on why the alert closed:
+
+- `[Pulse] RESOLVED: ...` when the value came back within the threshold
+  (`recovered`).
+- `[Pulse] RESOLVED (no longer evaluated): ...` when Pulse stopped
+  evaluating it (`not_evaluated`). The email says plainly that this is
+  **not** a recovery: the host may have stopped reporting, which can be
+  worse than the original alert. Disabling or deleting the rule, or
+  editing it so it no longer matches the series, closes its alerts the
+  same way.
+
+Delivery:
+
+- **Off the evaluation thread.** `AlertTracker` hands each change to a
+  `Notifier` only after the change is committed, and the `Notifier` sends
+  from its own thread. A slow or unreachable mail server never delays rule
+  evaluation, and nothing is announced that didn't make it into the database.
+- **Retried, then logged.** A failed send is retried after 5s and again
+  after 30s, then logged at ERROR as given up. Each successful send is
+  logged at INFO.
+- **Best effort, in memory.** Queued notifications are lost if the process
+  dies before sending them, and the queue drops new ones past 1,000 (logged
+  at ERROR). On a normal shutdown, the API sends what's queued first, for up
+  to 10s.
+- One email per transition, to every recipient. There are no per-rule
+  recipients and no batching.
 
 ## Migrations
 
@@ -540,3 +621,4 @@ half-applied. To add one, create the next numbered file, e.g.
 | ALERT-03 sustained duration via sliding window | `pulse_ingest/alerts.py` (`evaluate`), `pulse_ingest/store.py` (`rule_series` window), `tests/test_alerts.py`, `tests/test_alert_queries.py`, `tests/test_round_trip.py` |
 | ALERT-04 alert state machine | `migrations/004_alerts.sql`, `pulse_ingest/alerts.py` (`plan_transitions`, `AlertTracker`), `pulse_ingest/store.py` (`open_alerts`, `apply_alert_changes`), `tests/test_alerts.py`, `tests/test_alert_store.py`, `tests/test_migrate.py`, `tests/test_round_trip.py` |
 | ALERT-05 rule management (API side) | `pulse_ingest/app.py` (`/rules` endpoints), `pulse_ingest/store.py` (`list_rules` .. `delete_rule`, `UnknownHostError`), `tests/test_rule_endpoints.py`, `tests/test_rule_store.py`, `tests/fakes.py`; UI in `dashboard/` |
+| NOTIFY-01 email on fire and resolve | `pulse_ingest/notify.py`, `pulse_ingest/alerts.py` (`AlertTracker` hook), `pulse_ingest/app.py` (lifespan), `tests/test_notify.py`, `tests/test_alerts.py`, `tests/test_round_trip.py`, `tests/conftest.py` (`smtp_sink`) |

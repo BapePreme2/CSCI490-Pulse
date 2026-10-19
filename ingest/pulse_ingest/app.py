@@ -16,6 +16,7 @@ from pulse_ingest import __version__
 from pulse_ingest.alerts import DEFAULT_INTERVAL_SECONDS, AlertTracker, RuleEvaluator
 from pulse_ingest.auth import extract_bearer_token, is_valid_key, load_api_keys
 from pulse_ingest.migrate import database_url
+from pulse_ingest.notify import EmailChannel, EmailConfig, Notifier
 from pulse_ingest.schemas import AlertRuleIn, MetricBatch
 from pulse_ingest.store import AlertRule, HostSummary, PostgresMetricStore, Store, UnknownHostError
 
@@ -36,6 +37,18 @@ MAX_HISTORY_RANGE_SECONDS = 30 * 24 * 3600
 
 def _alert_interval() -> float:
     return float(os.environ.get("PULSE_ALERT_INTERVAL_SECONDS", DEFAULT_INTERVAL_SECONDS))
+
+
+def _notifier() -> Notifier | None:
+    email = EmailConfig.from_env()
+    if email is None:
+        logger.info("Email notifications off (PULSE_SMTP_HOST not set)")
+        return None
+    logger.info(
+        "Email notifications on: alerts go to %s via %s:%d (%s)",
+        ", ".join(email.recipients), email.host, email.port, email.security,
+    )
+    return Notifier([EmailChannel(email)])
 
 
 def _default_cors_origins() -> list[str]:
@@ -60,21 +73,30 @@ def create_app(
     # Rule evaluation runs only against the app's own Postgres store, i.e. in
     # a real deployment; API tests that inject a fake store don't start it.
     # Run a single API process: each one would evaluate every rule.
+    notifier = _notifier() if owned_store else None
     evaluator = (
-        RuleEvaluator(owned_store, AlertTracker(owned_store), interval=_alert_interval()) if owned_store else None
+        RuleEvaluator(owned_store, AlertTracker(owned_store, notifier), interval=_alert_interval())
+        if owned_store
+        else None
     )
 
     @asynccontextmanager
     async def lifespan(_app: FastAPI):
         if owned_store:
             owned_store.open()
+        if notifier:
+            notifier.start()
         if evaluator:
             evaluator.start()
         try:
             yield
         finally:
+            # Evaluator first, so its last notifications are queued before
+            # the notifier drains and stops.
             if evaluator:
                 evaluator.stop()
+            if notifier:
+                notifier.stop()
             if owned_store:
                 owned_store.close()
 
