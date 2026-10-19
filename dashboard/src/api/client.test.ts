@@ -2,11 +2,17 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   ApiError,
   HostNotFoundError,
+  RuleValidationError,
+  createRule,
+  deleteRule,
   fetchHostSummary,
   fetchHosts,
   fetchLatestMetrics,
   fetchMetricHistory,
+  fetchRules,
+  updateRule,
 } from "./client";
+import type { AlertRuleInput } from "./types";
 
 afterEach(() => {
   vi.unstubAllGlobals();
@@ -180,5 +186,105 @@ describe("fetchHostSummary", () => {
     mockFetch({ ok: false, status: 503 });
 
     await expect(fetchHostSummary("web-1")).rejects.toThrow(ApiError);
+  });
+});
+
+const RULE_INPUT: AlertRuleInput = {
+  name: "High CPU",
+  metric_name: "cpu.usage",
+  operator: ">",
+  threshold: 80,
+  duration_seconds: 300,
+  host: null,
+  tag_filter: { core: null },
+  enabled: true,
+};
+
+describe("alert rule requests", () => {
+  it("fetchRules returns the rules array", async () => {
+    const fetchMock = mockFetch({ json: async () => ({ rules: [{ ...RULE_INPUT, id: 1 }] }) });
+
+    const rules = await fetchRules();
+
+    expect(fetchMock).toHaveBeenCalledWith("http://localhost:8000/rules");
+    expect(rules.map((r) => r.id)).toEqual([1]);
+  });
+
+  it("createRule POSTs the rule as JSON and returns the stored rule", async () => {
+    const fetchMock = mockFetch({ status: 201, json: async () => ({ ...RULE_INPUT, id: 7 }) });
+
+    const created = await createRule(RULE_INPUT);
+
+    expect(created.id).toBe(7);
+    expect(fetchMock).toHaveBeenCalledWith("http://localhost:8000/rules", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(RULE_INPUT),
+    });
+  });
+
+  it("updateRule PUTs to the rule's own URL", async () => {
+    const fetchMock = mockFetch({ json: async () => ({ ...RULE_INPUT, id: 7 }) });
+
+    await updateRule(7, RULE_INPUT);
+
+    expect(fetchMock.mock.calls[0][0]).toBe("http://localhost:8000/rules/7");
+    expect(fetchMock.mock.calls[0][1].method).toBe("PUT");
+  });
+
+  it("deleteRule sends DELETE and doesn't try to parse the empty 204 body", async () => {
+    const json = vi.fn();
+    const fetchMock = mockFetch({ status: 204, json });
+
+    await deleteRule(7);
+
+    expect(fetchMock).toHaveBeenCalledWith("http://localhost:8000/rules/7", { method: "DELETE" });
+    expect(json).not.toHaveBeenCalled();
+  });
+
+  it("turns a 422 into a RuleValidationError listing each top-level field", async () => {
+    mockFetch({
+      ok: false,
+      status: 422,
+      json: async () => ({
+        detail: [
+          { loc: ["body", "threshold"], msg: "Input should be a finite number" },
+          { loc: ["body", "tag_filter", "core"], msg: "bad tag" },
+          { loc: ["body", "host"], msg: "Unknown host: ghost (it has never reported)" },
+        ],
+      }),
+    });
+
+    const error = await createRule(RULE_INPUT).catch((e: unknown) => e);
+
+    expect(error).toBeInstanceOf(RuleValidationError);
+    expect((error as RuleValidationError).errors).toEqual([
+      { field: "threshold", message: "Input should be a finite number" },
+      { field: "tag_filter", message: "bad tag" },
+      { field: "host", message: "Unknown host: ghost (it has never reported)" },
+    ]);
+  });
+
+  it("still throws RuleValidationError when a 422 body is unreadable", async () => {
+    mockFetch({ ok: false, status: 422, json: async () => { throw new SyntaxError("not json"); } });
+
+    const error = await createRule(RULE_INPUT).catch((e: unknown) => e);
+
+    expect(error).toBeInstanceOf(RuleValidationError);
+    expect((error as RuleValidationError).errors).toEqual([]);
+  });
+
+  it("explains a 404 as a rule that no longer exists", async () => {
+    mockFetch({ ok: false, status: 404 });
+
+    await expect(updateRule(9, RULE_INPUT)).rejects.toThrow("This rule no longer exists");
+  });
+
+  it("throws ApiError on other failures and when the API is unreachable", async () => {
+    mockFetch({ ok: false, status: 503 });
+    await expect(fetchRules()).rejects.toThrow(ApiError);
+
+    vi.stubGlobal("fetch", vi.fn().mockRejectedValue(new TypeError("network down")));
+    await expect(deleteRule(1)).rejects.toThrow("Could not reach the ingestion API.");
   });
 });

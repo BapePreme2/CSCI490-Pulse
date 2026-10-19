@@ -1,4 +1,4 @@
-import { render, screen } from "@testing-library/react";
+import { render, screen, within } from "@testing-library/react";
 import { MemoryRouter } from "react-router-dom";
 import { describe, expect, it, vi } from "vitest";
 import { App } from "./App";
@@ -10,6 +10,7 @@ vi.mock("./api/client", () => ({
   fetchMetricHistory: vi.fn().mockReturnValue(new Promise(() => {})),
   fetchHostSummary: vi.fn().mockReturnValue(new Promise(() => {})),
   fetchHosts: vi.fn().mockReturnValue(new Promise(() => {})),
+  fetchRules: vi.fn().mockReturnValue(new Promise(() => {})),
 }));
 
 function renderAt(path: string) {
@@ -37,5 +38,20 @@ describe("App routing", () => {
     renderAt("/hosts/web-1");
 
     expect(screen.getByRole("link", { name: "Pulse" })).toHaveAttribute("href", "/");
+  });
+
+  it("renders the alert rules page at /rules", () => {
+    renderAt("/rules");
+
+    expect(screen.getByRole("heading", { name: "Alert rules" })).toBeInTheDocument();
+  });
+
+  it("has header links to the fleet and the rules, marking the current one", () => {
+    renderAt("/rules");
+
+    const nav = screen.getByRole("navigation", { name: "Main" });
+    expect(within(nav).getByRole("link", { name: "Fleet" })).toHaveAttribute("href", "/");
+    expect(within(nav).getByRole("link", { name: "Alert rules" })).toHaveAttribute("aria-current", "page");
+    expect(within(nav).getByRole("link", { name: "Fleet" })).not.toHaveAttribute("aria-current");
   });
 });

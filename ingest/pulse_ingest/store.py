@@ -8,7 +8,7 @@ from typing import Literal, Protocol
 from psycopg.types.json import Jsonb
 from psycopg_pool import ConnectionPool
 
-from pulse_ingest.schemas import MetricBatch
+from pulse_ingest.schemas import AlertRuleIn, MetricBatch
 
 HostStatus = Literal["online", "offline"]
 
@@ -179,6 +179,37 @@ WHERE id = %(id)s
 
 _DELETE_ALERT = "DELETE FROM alerts WHERE id = %s"
 
+# A rule's host is exposed by hostname (NULL for fleet-wide), not host_id.
+_RULE_SELECT = """
+SELECT
+    r.id, r.name, r.metric_name, r.operator, r.threshold, r.duration_seconds,
+    h.hostname, r.tag_filter, r.enabled,
+    extract(epoch FROM r.created_at), extract(epoch FROM r.updated_at)
+FROM alert_rules r
+LEFT JOIN hosts h ON h.id = r.host_id
+"""
+
+_INSERT_RULE = """
+INSERT INTO alert_rules (name, metric_name, operator, threshold, duration_seconds, host_id, tag_filter, enabled)
+VALUES (%(name)s, %(metric_name)s, %(operator)s, %(threshold)s, %(duration_seconds)s,
+        %(host_id)s, %(tag_filter)s, %(enabled)s)
+RETURNING id
+"""
+
+_UPDATE_RULE = """
+UPDATE alert_rules SET
+    name = %(name)s, metric_name = %(metric_name)s, operator = %(operator)s,
+    threshold = %(threshold)s, duration_seconds = %(duration_seconds)s,
+    host_id = %(host_id)s, tag_filter = %(tag_filter)s, enabled = %(enabled)s,
+    updated_at = now()
+WHERE id = %(id)s
+RETURNING id
+"""
+
+_DELETE_RULE = "DELETE FROM alert_rules WHERE id = %s"
+
+_HOST_ID = "SELECT id FROM hosts WHERE hostname = %s"
+
 
 @dataclass(frozen=True)
 class WriteResult:
@@ -233,6 +264,31 @@ class RuleSeries:
     unit: str
     tags: dict[str, str]
     points: list[HistoryPoint] = field(default_factory=list)
+
+
+@dataclass(frozen=True)
+class AlertRule:
+    """One row of `alert_rules`, with `host` as a hostname (None = fleet-wide)."""
+
+    id: int
+    name: str
+    metric_name: str
+    operator: str
+    threshold: float
+    duration_seconds: int
+    host: str | None
+    tag_filter: dict[str, str | None]
+    enabled: bool
+    created_at: float
+    updated_at: float
+
+
+class UnknownHostError(Exception):
+    """A rule named a host that has never reported."""
+
+    def __init__(self, host: str) -> None:
+        super().__init__(f"Unknown host: {host}")
+        self.host = host
 
 
 AlertState = Literal["pending", "firing", "resolved"]
@@ -296,7 +352,23 @@ class QueryStore(Protocol):
         """All samples for one metric name in [start, end], grouped into series by tags."""
 
 
-class Store(MetricStore, QueryStore, Protocol):
+class RuleStore(Protocol):
+    def list_rules(self) -> list[AlertRule]: ...
+
+    def get_rule(self, rule_id: int) -> AlertRule | None: ...
+
+    def create_rule(self, rule: AlertRuleIn) -> AlertRule:
+        """Raises UnknownHostError if `rule.host` has never reported."""
+
+    def update_rule(self, rule_id: int, rule: AlertRuleIn) -> AlertRule | None:
+        """Replace a rule entirely. None if it doesn't exist; raises
+        UnknownHostError if `rule.host` has never reported."""
+
+    def delete_rule(self, rule_id: int) -> bool:
+        """False if it didn't exist. Its alerts are kept (rule_id SET NULL)."""
+
+
+class Store(MetricStore, QueryStore, RuleStore, Protocol):
     """Everything the API needs from a storage backend."""
 
 
@@ -435,6 +507,51 @@ class PostgresMetricStore:
             current.points.append(HistoryPoint(timestamp=float(ts), value=value))
         return result
 
+    def list_rules(self) -> list[AlertRule]:
+        with self._pool.connection() as conn:
+            rows = conn.execute(_RULE_SELECT + "ORDER BY r.id").fetchall()
+        return [_rule_from_row(row) for row in rows]
+
+    def get_rule(self, rule_id: int) -> AlertRule | None:
+        with self._pool.connection() as conn:
+            row = conn.execute(_RULE_SELECT + "WHERE r.id = %s", (rule_id,)).fetchone()
+        return None if row is None else _rule_from_row(row)
+
+    def create_rule(self, rule: AlertRuleIn) -> AlertRule:
+        with self._pool.connection() as conn, conn.transaction():
+            (rule_id,) = conn.execute(_INSERT_RULE, self._rule_params(conn, rule)).fetchone()
+            return _rule_from_row(conn.execute(_RULE_SELECT + "WHERE r.id = %s", (rule_id,)).fetchone())
+
+    def update_rule(self, rule_id: int, rule: AlertRuleIn) -> AlertRule | None:
+        with self._pool.connection() as conn, conn.transaction():
+            params = {**self._rule_params(conn, rule), "id": rule_id}
+            if conn.execute(_UPDATE_RULE, params).fetchone() is None:
+                return None
+            return _rule_from_row(conn.execute(_RULE_SELECT + "WHERE r.id = %s", (rule_id,)).fetchone())
+
+    def delete_rule(self, rule_id: int) -> bool:
+        with self._pool.connection() as conn:
+            return conn.execute(_DELETE_RULE, (rule_id,)).rowcount == 1
+
+    @staticmethod
+    def _rule_params(conn, rule: AlertRuleIn) -> dict:
+        host_id = None
+        if rule.host is not None:
+            row = conn.execute(_HOST_ID, (rule.host,)).fetchone()
+            if row is None:
+                raise UnknownHostError(rule.host)
+            host_id = row[0]
+        return {
+            "name": rule.name,
+            "metric_name": rule.metric_name,
+            "operator": rule.operator,
+            "threshold": rule.threshold,
+            "duration_seconds": rule.duration_seconds,
+            "host_id": host_id,
+            "tag_filter": Jsonb(rule.tag_filter),
+            "enabled": rule.enabled,
+        }
+
     def open_alerts(self) -> list[Alert]:
         with self._pool.connection() as conn:
             rows = conn.execute(_OPEN_ALERTS).fetchall()
@@ -479,6 +596,23 @@ class PostgresMetricStore:
                     conn.execute(_UPDATE_ALERT, _alert_params(change.after))
                 applied.append(change)
         return applied
+
+
+def _rule_from_row(row) -> AlertRule:
+    rule_id, name, metric_name, op, threshold, duration, host, tag_filter, enabled, created, updated = row
+    return AlertRule(
+        id=rule_id,
+        name=name,
+        metric_name=metric_name,
+        operator=op,
+        threshold=threshold,
+        duration_seconds=duration,
+        host=host,
+        tag_filter=tag_filter,
+        enabled=enabled,
+        created_at=float(created),
+        updated_at=float(updated),
+    )
 
 
 def _epoch(value) -> float | None:

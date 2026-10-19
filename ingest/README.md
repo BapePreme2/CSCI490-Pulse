@@ -74,6 +74,9 @@ or the browser silently blocks the dashboard's JavaScript from reading the
 response -- the request still succeeds server-side, but `fetch()` in the
 browser sees it as a network failure either way.
 
+Allowed methods are `GET`, `POST`, `PUT`, and `DELETE` (the last two for
+editing and deleting alert rules).
+
 Allowed origins come from `PULSE_CORS_ORIGINS` (comma-separated), defaulting
 to `http://localhost:5173`. Set it to the dashboard's real URL(s) in any
 other environment.
@@ -391,13 +394,41 @@ Operational notes:
 - Shutdown interrupts the wait between cycles, so stopping the API doesn't
   hang for up to a full interval.
 
-There's no API for rules yet (that's ALERT-05), so to try it, add one in
-SQL and watch the API log (and the `alerts` table):
+To try it, create a rule on the dashboard's **Alert rules** page (or with
+`POST /rules`, below) and watch the API log and the `alerts` table.
+
+## Rule endpoints (ALERT-05)
+
+The dashboard's **Alert rules** page uses these. Bodies are the `AlertRuleIn`
+shape from [Alert rules](#alert-rules) above; responses add `id`,
+`created_at`, and `updated_at` (epoch seconds), with `host` as a hostname or
+`null`.
+
+| Method | Path | Result |
+| --- | --- | --- |
+| `GET` | `/rules` | `200 {"rules": [...]}`, oldest first |
+| `GET` | `/rules/{id}` | `200` the rule, or `404` |
+| `POST` | `/rules` | `201` the created rule |
+| `PUT` | `/rules/{id}` | `200` the rule, replaced entirely (there's no partial update), or `404` |
+| `DELETE` | `/rules/{id}` | `204`, or `404`. Alerts it raised are kept (see below). |
+
+- Invalid bodies get FastAPI's usual `422` with field-level `detail`. A
+  `host` that has never reported is a `422` too, reported at
+  `["body", "host"]` like any other bad field, so a form can show it next to
+  the host picker.
+- A database outage is a `503`, as elsewhere.
+- Changes are picked up on the evaluator's next cycle; nothing needs
+  restarting.
+- **No authentication**, like the other dashboard endpoints: the dashboard
+  has no credentials of its own to send. That means anyone who can reach
+  the API can change the rules, so the API (port 8000) must stay on a
+  trusted network and not be exposed publicly. Real user auth is out of
+  scope for this semester's plan.
 
 ```bash
-docker exec -it pulse-postgres psql -U pulse -d pulse -c "
-  INSERT INTO alert_rules (name, metric_name, operator, threshold, duration_seconds, tag_filter)
-  VALUES ('High overall CPU', 'cpu.usage', '>', 50, 0, '{\"core\": null}')"
+curl -X POST http://127.0.0.1:8000/rules -H "Content-Type: application/json" \
+  -d '{"name": "High overall CPU", "metric_name": "cpu.usage", "operator": ">",
+       "threshold": 90, "duration_seconds": 300, "tag_filter": {"core": null}}'
 ```
 
 ## Alerts (state machine)
@@ -455,6 +486,12 @@ Design decisions:
 - **Times:** `pending_since` is the start of the breaching run (sample
   time, the agent's clock); `fired_at` and `resolved_at` are when the
   evaluator decided (the API server's clock).
+- **A new rule judges existing history.** The sliding window reads stored
+  samples, so if the condition has already held for `duration_seconds`
+  when a rule is created (or enabled), it fires on its first cycle with no
+  pending step. `memory.used > 1 for 4s` on a host that has reported for a
+  minute fires within a second of being saved. That's the condition being
+  true, not a shortcut.
 
 ## Migrations
 
@@ -502,3 +539,4 @@ half-applied. To add one, create the next numbered file, e.g.
 | ALERT-02 rule evaluation loop | `pulse_ingest/alerts.py`, `pulse_ingest/store.py` (`rule_series`), `pulse_ingest/app.py` (lifespan), `tests/test_alerts.py`, `tests/test_alert_queries.py`, `tests/test_round_trip.py` |
 | ALERT-03 sustained duration via sliding window | `pulse_ingest/alerts.py` (`evaluate`), `pulse_ingest/store.py` (`rule_series` window), `tests/test_alerts.py`, `tests/test_alert_queries.py`, `tests/test_round_trip.py` |
 | ALERT-04 alert state machine | `migrations/004_alerts.sql`, `pulse_ingest/alerts.py` (`plan_transitions`, `AlertTracker`), `pulse_ingest/store.py` (`open_alerts`, `apply_alert_changes`), `tests/test_alerts.py`, `tests/test_alert_store.py`, `tests/test_migrate.py`, `tests/test_round_trip.py` |
+| ALERT-05 rule management (API side) | `pulse_ingest/app.py` (`/rules` endpoints), `pulse_ingest/store.py` (`list_rules` .. `delete_rule`, `UnknownHostError`), `tests/test_rule_endpoints.py`, `tests/test_rule_store.py`, `tests/fakes.py`; UI in `dashboard/` |

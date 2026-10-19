@@ -2,6 +2,7 @@ import { Route, Routes } from "react-router-dom";
 import { AppShell } from "./layout/AppShell";
 import { FleetOverviewPage } from "./routes/FleetOverviewPage";
 import { HostPage } from "./routes/HostPage";
+import { RulesPage } from "./routes/RulesPage";
 
 export function App() {
   return (
@@ -9,6 +10,7 @@ export function App() {
       <Routes>
         <Route path="/" element={<FleetOverviewPage />} />
         <Route path="/hosts/:hostname" element={<HostPage />} />
+        <Route path="/rules" element={<RulesPage />} />
       </Routes>
     </AppShell>
   );

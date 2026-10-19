@@ -61,9 +61,33 @@ body {
 }
 
 .app-header {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-2) var(--space-5);
   padding: var(--space-3) var(--space-5);
   border-bottom: 1px solid var(--color-border);
   background: var(--color-surface);
+}
+
+.app-nav {
+  display: flex;
+  gap: var(--space-4);
+}
+
+.app-nav-link {
+  color: var(--color-muted);
+  text-decoration: none;
+  font-size: 0.95rem;
+}
+
+.app-nav-link:hover {
+  color: var(--color-text);
+}
+
+.app-nav-link.active {
+  color: var(--color-accent);
+  font-weight: 600;
 }
 
 .app-title {
@@ -331,6 +355,239 @@ h1 {
 
 .fleet-status--offline .fleet-status-dot {
   background: var(--color-danger);
+}
+
+.page-header {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-3);
+  margin-bottom: var(--space-4);
+}
+
+.page-header h1 {
+  margin: 0;
+}
+
+.button {
+  padding: 6px 14px;
+  font: inherit;
+  font-size: 0.9rem;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-sm);
+  background: var(--color-surface);
+  color: var(--color-text);
+  cursor: pointer;
+}
+
+.button:hover:not(:disabled) {
+  border-color: var(--color-accent);
+}
+
+.button:disabled {
+  opacity: 0.6;
+  cursor: default;
+}
+
+.button--primary {
+  background: var(--color-accent);
+  border-color: var(--color-accent);
+  color: var(--color-accent-contrast);
+  font-weight: 600;
+}
+
+.button--danger {
+  color: var(--color-danger);
+}
+
+.button--danger:hover:not(:disabled) {
+  border-color: var(--color-danger);
+}
+
+.button--ghost {
+  border-color: transparent;
+  background: transparent;
+  color: var(--color-accent);
+}
+
+.rule-list {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.rule-card {
+  background: var(--color-surface);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  box-shadow: var(--shadow-tile);
+  padding: var(--space-4);
+}
+
+.rule-card-header {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-2) var(--space-3);
+}
+
+.rule-card-name {
+  margin: 0;
+  font-size: 1rem;
+}
+
+.rule-badge {
+  padding: 1px 8px;
+  border-radius: 999px;
+  border: 1px solid currentColor;
+  font-size: 0.75rem;
+  font-weight: 600;
+}
+
+.rule-badge--enabled {
+  color: var(--color-online);
+}
+
+.rule-badge--disabled {
+  color: var(--color-muted);
+}
+
+.rule-card-condition {
+  margin: var(--space-2) 0 var(--space-1);
+  overflow-wrap: anywhere;
+}
+
+.rule-card-condition code,
+.rule-form code {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 0.9em;
+}
+
+.rule-card-scope {
+  margin: 0;
+  color: var(--color-muted);
+  font-size: 0.9rem;
+  overflow-wrap: anywhere;
+}
+
+.rule-card-actions {
+  display: flex;
+  gap: var(--space-2);
+  margin-top: var(--space-3);
+}
+
+.rule-form {
+  margin-bottom: var(--space-5);
+  padding: var(--space-4);
+  background: var(--color-surface);
+  border: 1px solid var(--color-accent);
+  border-radius: var(--radius-md);
+  box-shadow: var(--shadow-tile);
+}
+
+.rule-form h2 {
+  margin: 0 0 var(--space-3);
+  font-size: 1.1rem;
+}
+
+.rule-form-errors {
+  margin: 0 0 var(--space-3);
+  padding-left: 18px;
+  color: var(--color-danger);
+}
+
+/* 190px minimum: at the page's 900px max width that allows at most 4
+   columns, one per field, instead of an empty 5th track squeezing them. */
+.rule-form-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(190px, 1fr));
+  gap: var(--space-3);
+}
+
+.rule-form-field {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+  font-size: 0.85rem;
+  font-weight: 600;
+  color: var(--color-muted);
+}
+
+.rule-form-field--wide {
+  grid-column: 1 / -1;
+}
+
+.rule-form input,
+.rule-form select {
+  min-width: 0;
+  padding: 6px 8px;
+  font: inherit;
+  font-size: 0.95rem;
+  font-weight: 400;
+  color: var(--color-text);
+  background: var(--color-bg);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-sm);
+}
+
+.rule-form input:focus,
+.rule-form select:focus {
+  outline: 2px solid var(--color-accent);
+  outline-offset: -1px;
+}
+
+.rule-form-hint {
+  min-height: 1.2em;
+  font-size: 0.8rem;
+  font-weight: 400;
+  color: var(--color-muted);
+}
+
+.rule-form-tags {
+  margin: var(--space-4) 0 0;
+  padding: var(--space-3);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-sm);
+}
+
+.rule-form-tags legend {
+  padding: 0 var(--space-1);
+  font-size: 0.85rem;
+  font-weight: 600;
+  color: var(--color-muted);
+}
+
+.rule-form-tags p {
+  margin: 0 0 var(--space-2);
+}
+
+.rule-form-tag-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+  margin-bottom: var(--space-2);
+}
+
+.rule-form-tag-row input {
+  flex: 1 1 100px;
+}
+
+.rule-form-check {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  margin-top: var(--space-3);
+  font-size: 0.95rem;
+}
+
+.rule-form-actions {
+  display: flex;
+  gap: var(--space-2);
+  margin-top: var(--space-4);
 }
 
 @media (max-width: 480px) {

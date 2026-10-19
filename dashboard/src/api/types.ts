@@ -48,3 +48,29 @@ export interface FleetHostsResponse {
 /** Same shape as one entry of GET /hosts; the semantic name for the
  * single-host GET /hosts/{host} response. */
 export type HostSummary = FleetHost;
+
+export type Operator = ">" | ">=" | "<" | "<=";
+
+/** What the API accepts to create or replace a rule (`AlertRuleIn`). */
+export interface AlertRuleInput {
+  name: string;
+  metric_name: string;
+  operator: Operator;
+  threshold: number;
+  duration_seconds: number;
+  /** null = fleet-wide. */
+  host: string | null;
+  /** A string value requires that tag value; null requires the tag to be absent. */
+  tag_filter: Record<string, string | null>;
+  enabled: boolean;
+}
+
+export interface AlertRule extends AlertRuleInput {
+  id: number;
+  created_at: number;
+  updated_at: number;
+}
+
+export interface AlertRulesResponse {
+  rules: AlertRule[];
+}

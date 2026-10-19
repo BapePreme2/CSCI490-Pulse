@@ -7,7 +7,7 @@ from collections.abc import Iterable
 from contextlib import asynccontextmanager
 
 import psycopg
-from fastapi import FastAPI, HTTPException, Query, Request, status
+from fastapi import FastAPI, HTTPException, Query, Request, Response, status
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from psycopg_pool import PoolTimeout
@@ -16,8 +16,8 @@ from pulse_ingest import __version__
 from pulse_ingest.alerts import DEFAULT_INTERVAL_SECONDS, AlertTracker, RuleEvaluator
 from pulse_ingest.auth import extract_bearer_token, is_valid_key, load_api_keys
 from pulse_ingest.migrate import database_url
-from pulse_ingest.schemas import MetricBatch
-from pulse_ingest.store import HostSummary, PostgresMetricStore, Store
+from pulse_ingest.schemas import AlertRuleIn, MetricBatch
+from pulse_ingest.store import AlertRule, HostSummary, PostgresMetricStore, Store, UnknownHostError
 
 # uvicorn configures only its own loggers (uvicorn/uvicorn.access/uvicorn.error);
 # the root logger otherwise has no handler and a default level of WARNING, so
@@ -102,7 +102,7 @@ def create_app(
     app.add_middleware(
         CORSMiddleware,
         allow_origins=origins,
-        allow_methods=["GET", "POST"],
+        allow_methods=["GET", "POST", "PUT", "DELETE"],
         allow_headers=["Authorization", "Content-Type"],
     )
 
@@ -205,7 +205,94 @@ def create_app(
             ],
         }
 
+    # --- alert rules (ALERT-05). Like the read endpoints, these need no API
+    # key: the dashboard is the client, and it has no credentials of its own.
+
+    @app.get("/rules")
+    def list_rules() -> dict:
+        try:
+            rules = store.list_rules()
+        except (psycopg.OperationalError, PoolTimeout):
+            raise _database_unavailable()
+        return {"rules": [_rule_dict(r) for r in rules]}
+
+    @app.get("/rules/{rule_id}")
+    def get_rule(rule_id: int) -> dict:
+        try:
+            rule = store.get_rule(rule_id)
+        except (psycopg.OperationalError, PoolTimeout):
+            raise _database_unavailable()
+        if rule is None:
+            raise _rule_not_found(rule_id)
+        return _rule_dict(rule)
+
+    @app.post("/rules", status_code=status.HTTP_201_CREATED)
+    def create_rule(rule: AlertRuleIn) -> dict:
+        try:
+            created = store.create_rule(rule)
+        except UnknownHostError as exc:
+            raise _unknown_rule_host(exc)
+        except (psycopg.OperationalError, PoolTimeout):
+            raise _database_unavailable()
+        logger.info("Alert rule %d created: %s", created.id, created.name)
+        return _rule_dict(created)
+
+    @app.put("/rules/{rule_id}")
+    def update_rule(rule_id: int, rule: AlertRuleIn) -> dict:
+        try:
+            updated = store.update_rule(rule_id, rule)
+        except UnknownHostError as exc:
+            raise _unknown_rule_host(exc)
+        except (psycopg.OperationalError, PoolTimeout):
+            raise _database_unavailable()
+        if updated is None:
+            raise _rule_not_found(rule_id)
+        logger.info("Alert rule %d updated: %s", updated.id, updated.name)
+        return _rule_dict(updated)
+
+    @app.delete("/rules/{rule_id}", status_code=status.HTTP_204_NO_CONTENT)
+    def delete_rule(rule_id: int) -> Response:
+        try:
+            deleted = store.delete_rule(rule_id)
+        except (psycopg.OperationalError, PoolTimeout):
+            raise _database_unavailable()
+        if not deleted:
+            raise _rule_not_found(rule_id)
+        logger.info("Alert rule %d deleted", rule_id)
+        return Response(status_code=status.HTTP_204_NO_CONTENT)
+
     return app
+
+
+def _rule_not_found(rule_id: int) -> HTTPException:
+    return HTTPException(status.HTTP_404_NOT_FOUND, detail=f"Unknown rule: {rule_id}")
+
+
+def _unknown_rule_host(exc: UnknownHostError) -> HTTPException:
+    # 422 like any other invalid field, located at ("body", "host") so a
+    # form can show it next to the host picker.
+    # Plain 422: Starlette renamed this constant, and the new name doesn't
+    # exist in every version pyproject.toml allows.
+    return HTTPException(
+        422,
+        detail=[{"loc": ["body", "host"], "msg": f"{exc} (it has never reported)", "type": "unknown_host"}],
+    )
+
+
+def _rule_dict(r: AlertRule) -> dict:
+    return {
+        "id": r.id,
+        "name": r.name,
+        "metric_name": r.metric_name,
+        "operator": r.operator,
+        "threshold": r.threshold,
+        "duration_seconds": r.duration_seconds,
+        "host": r.host,
+        "tag_filter": r.tag_filter,
+        "enabled": r.enabled,
+        "created_at": r.created_at,
+        "updated_at": r.updated_at,
+    }
 
 
 def _database_unavailable() -> HTTPException:

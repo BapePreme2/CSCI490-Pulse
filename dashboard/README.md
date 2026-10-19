@@ -31,10 +31,12 @@ npm run build
 ## Structure
 
 - `src/main.tsx` -- entry point; mounts `<App>` inside `BrowserRouter`.
-- `src/App.tsx` -- routes: `/` (fleet overview) and `/hosts/:hostname` (a
-  single host's page).
+- `src/App.tsx` -- routes: `/` (fleet overview), `/hosts/:hostname` (a
+  single host's page), and `/rules` (alert rules).
 - `src/layout/AppShell.tsx` -- shared header + content area every route
-  renders inside.
+  renders inside. The header's nav (`Fleet`, `Alert rules`) uses `NavLink`,
+  so the current page's link gets `aria-current="page"` and the accent
+  color.
 - `src/routes/FleetOverviewPage.tsx` -- every known host from `GET /hosts`,
   as a table (hostname linking to its page, a status badge, last-seen, CPU,
   memory), with the same live-polling (`FLEET_POLL_INTERVAL_MS`, 5s) and
@@ -79,6 +81,32 @@ npm run build
   1h/6h/24h/7d buttons above the chart. Selecting one re-fetches the chart's
   history with a new `start`/`end` window; it does not affect the tiles'
   live polling.
+
+- `src/routes/RulesPage.tsx` -- alert rule management (ALERT-05): every rule
+  from `GET /rules` as a card (name, enabled badge, the condition as
+  `cpu.usage > 80 for 5m`, the scope and tag filter), with Edit and Delete,
+  plus a "New rule" button. Create/edit open `RuleForm` above the list;
+  saving reloads the list. Delete asks for confirmation first (alerts the
+  rule already raised stay in the history). No polling: the list only
+  changes when you change it.
+- `src/components/RuleForm.tsx` -- the create/edit form: name, metric (with
+  the agent's metric names offered as suggestions, but any name accepted),
+  operator, threshold, duration in seconds (with a live "Fires after 5m in
+  breach" hint), a host picker ("All hosts" or one host from `GET /hosts`),
+  tag filter rows (each "equals" a value or "must be absent"), and enabled.
+  Mistakes it can catch itself are shown without calling the API; the API's
+  own `422` field errors are shown the same way, labelled with the form's
+  field names (e.g. "Hosts: Unknown host: ghost").
+- `src/rules/form.ts` -- converts between the form's text fields and the
+  API's `AlertRuleInput` (`formFromRule`, `inputFromForm`), including the
+  tag filter rows <-> `{"core": null, "mount": "/"}`. Pure functions, so the
+  conversion is tested without rendering anything.
+- `src/rules/format.ts` -- display text for rules: `formatDuration` (300 ->
+  `5m`), `describeCondition`, `describeTagFilter` (`no core tag, mount = /`).
+- `src/api/client.ts` also has `fetchRules`/`createRule`/`updateRule`/
+  `deleteRule`. A `422` becomes a `RuleValidationError` listing each field
+  the API objected to; a `404` on edit/delete means the rule was deleted
+  elsewhere and says so.
 
 The dashboard calls the ingest API directly from the browser (a different
 origin in dev), which needs the API's CORS support -- see
@@ -162,3 +190,18 @@ every line either.
 | FLEET-03 fleet overview page | `src/routes/FleetOverviewPage.tsx`, `src/api/client.ts` (`fetchHosts`), `src/metrics/format.ts` (`formatRelativeTime`), `src/index.css` (`.fleet-table`) |
 | FLEET-04 online/offline status badge | `src/routes/FleetOverviewPage.tsx`, `src/api/types.ts` (`HostStatus`), `src/index.css` (`.fleet-status`) |
 | FLEET-05 per-host status on the detail page | `src/routes/HostPage.tsx`, `src/api/client.ts` (`fetchHostSummary`), `src/index.css` (`.host-page-header`) |
+
+## Task mapping (Week 7)
+
+| Task | File(s) |
+| --- | --- |
+| ALERT-05 alert rule management UI | `src/routes/RulesPage.tsx`, `src/components/RuleForm.tsx`, `src/rules/`, `src/api/client.ts` (rule requests), `src/api/types.ts` (`AlertRule`), `src/layout/AppShell.tsx` (nav), `src/App.tsx`, `src/index.css` (`.rule-*`, `.button`, `.app-nav`); API side in `ingest/` |
+
+Checked end to end in a real browser (headless Chromium) against the real
+API and a real agent: creating, editing, and deleting rules; an API-side
+`422` shown in the form; a rule created here firing in the API's evaluator,
+then resolving as `not_evaluated` once deleted; both color schemes; and no
+horizontal scroll at 360px. That pass caught two things no unit test
+could: the host picker was clipped because the form grid made five columns
+for four fields at desktop width, and placeholder text like `80` looked
+like a value that was already filled in (now `e.g. 80`).
