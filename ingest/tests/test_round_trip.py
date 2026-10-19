@@ -99,7 +99,7 @@ def start_agent(port, api_key, procs, tmp_path):
         f"api_key: {api_key}\n"
         f"hostname: {HOST}\n"
         "interval_seconds: 1\n"
-        "tags:\n  environment: e2e\n"
+        "environment: e2e\n"
     )
     return spawn(
         [str(AGENT_BIN), "--config", str(config), "--log-level", "DEBUG"],
