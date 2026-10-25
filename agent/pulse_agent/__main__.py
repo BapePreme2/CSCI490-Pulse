@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import logging
+import signal
 import sys
 
 from pulse_agent.agent import LoggingSender, PulseAgent
@@ -38,6 +39,12 @@ def main(argv: list[str] | None = None) -> int:
     if args.once:
         agent.run_once()
     else:
+        # SIGTERM is how `docker stop`, systemd, and `kill` ask a process to
+        # exit, and Python only handles SIGINT itself. Worse, as PID 1 in a
+        # container an unhandled SIGTERM is ignored outright, so `docker stop`
+        # used to wait its full 10s and then kill the agent.
+        for signum in (signal.SIGTERM, signal.SIGINT):
+            signal.signal(signum, lambda *_: agent.stop())
         agent.run_forever()
     return 0
 

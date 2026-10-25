@@ -5,7 +5,7 @@ from dataclasses import replace
 import psycopg
 import pytest
 
-from pulse_ingest.alerts import OPERATORS, AlertTracker, RuleEvaluator, evaluate, plan_transitions
+from pulse_ingest.alerts import CATCH_UP_SECONDS, OPERATORS, AlertTracker, RuleEvaluator, evaluate, plan_transitions
 from pulse_ingest.schemas import Operator
 from pulse_ingest.store import STALE_AFTER_SECONDS, Alert, HistoryPoint, RuleSeries
 
@@ -147,8 +147,46 @@ def test_evaluate_once_asks_for_recent_series_with_gap_padding_and_hands_off_res
     results = evaluator.evaluate_once()
 
     assert store.calls == [(NOW - 30, 25)]
-    assert handled == [(results, NOW)]
+    # The first cycle is always catching up.
+    assert handled == [(results, NOW, True)]
     assert [r.breaching for r in results] == [True, False]
+
+
+def test_catching_up_lasts_catch_up_seconds_from_the_first_cycle():
+    clock = [NOW]
+    flags = []
+    evaluator = RuleEvaluator(FakeAlertStore(), lambda e, now, catching_up: flags.append(catching_up), clock=lambda: clock[0])
+
+    for offset in (0, 60, CATCH_UP_SECONDS - 1, CATCH_UP_SECONDS, 500):
+        clock[0] = NOW + offset
+        evaluator.evaluate_once()
+
+    assert flags == [True, True, True, False, False]
+
+
+def test_a_database_outage_starts_catching_up_again():
+    # Cycle times 0, 100, 200, ...; the first one fails. Without the reset,
+    # the cycle at 100 would already be past the catch-up window.
+    times = iter(range(0, 10_000, 100))
+    flags = []
+    done = threading.Event()
+
+    def handle(evaluations, now, catching_up):
+        flags.append((now, catching_up))
+        if len(flags) == 2:
+            done.set()
+
+    store = FakeAlertStore(errors=[psycopg.OperationalError("db down")])
+    evaluator = RuleEvaluator(store, handle, interval=0.01, clock=lambda: next(times))
+    evaluator.start()
+    try:
+        assert done.wait(5)
+    finally:
+        evaluator.stop()
+
+    # The window restarts at the first cycle after the outage (100), and
+    # lasts the usual CATCH_UP_SECONDS from there.
+    assert flags[:2] == [(100, True), (200, False)]
 
 
 def test_rejects_non_positive_interval():
@@ -340,9 +378,13 @@ def test_alert_matches_its_series_regardless_of_tag_order():
 
 
 class FakeAlertTrackerStore:
-    def __init__(self, open_alerts=()):
+    def __init__(self, open_alerts=(), enabled_rules=(1,)):
         self.open = list(open_alerts)
         self.applied = []
+        self.enabled = set(enabled_rules)
+
+    def enabled_rule_ids(self):
+        return self.enabled
 
     def open_alerts(self):
         return self.open
@@ -426,3 +468,45 @@ def test_tracker_notifies_nothing_if_storing_fails():
         AlertTracker(FailingStore(), seen.append)(evaluate([sustained_series()]), LATER)
 
     assert seen == []
+
+
+# --- catching up after a restart or a database outage ---
+
+
+def test_held_rules_alerts_stay_as_they_are_when_not_evaluated():
+    firing = alert("firing", alert_id=1, fired_at=NOW - 60, core="0")
+    pending = alert("pending", alert_id=2, core="1")
+    other_rule = alert("firing", alert_id=3, rule_id=2, fired_at=NOW - 60)
+    orphaned = alert("firing", alert_id=4, rule_id=None, fired_at=NOW - 60)
+
+    changes = plan_transitions([firing, pending, other_rule, orphaned], [], LATER, hold_rule_ids={1})
+
+    assert sorted((c.kind, c.before.id) for c in changes) == [("resolved", 3), ("resolved", 4)]
+
+
+def test_held_rules_alerts_still_move_on_when_they_are_evaluated():
+    firing = alert("firing", alert_id=1, fired_at=NOW - 60)
+
+    (change,) = plan_transitions([firing], evaluate([ok_series()]), LATER, hold_rule_ids={1})
+
+    assert (change.kind, change.after.resolve_reason) == ("resolved", "recovered")
+
+
+def test_tracker_holds_only_enabled_rules_alerts_while_catching_up():
+    store = FakeAlertTrackerStore(
+        [alert("firing", alert_id=1, fired_at=NOW - 60), alert("firing", alert_id=2, rule_id=2, fired_at=NOW - 60)],
+        enabled_rules={1},
+    )
+
+    changes = AlertTracker(store)([], LATER, True)
+
+    # Rule 2 was disabled or deleted: that's an answer, not a data gap.
+    assert [(c.kind, c.before.id) for c in changes] == [("resolved", 2)]
+
+
+def test_tracker_resolves_unevaluated_alerts_once_caught_up():
+    store = FakeAlertTrackerStore([alert("firing", alert_id=1, fired_at=NOW - 60)])
+
+    (change,) = AlertTracker(store)([], LATER, False)
+
+    assert change.after.resolve_reason == "not_evaluated"

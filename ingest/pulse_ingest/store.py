@@ -230,6 +230,8 @@ _DELETE_RULE = "DELETE FROM alert_rules WHERE id = %s"
 
 _HOST_ID = "SELECT id FROM hosts WHERE hostname = %s"
 
+_ENABLED_RULE_IDS = "SELECT id FROM alert_rules WHERE enabled"
+
 
 @dataclass(frozen=True)
 class WriteResult:
@@ -419,6 +421,8 @@ class AlertStore(Protocol):
     def open_alerts(self) -> list[Alert]:
         """Every pending or firing alert."""
 
+    def enabled_rule_ids(self) -> set[int]: ...
+
     def apply_alert_changes(self, changes: list[AlertChange]) -> list[AlertChange]:
         """Persist the changes in one transaction. Returns them with inserted
         alerts' new ids filled in."""
@@ -593,6 +597,10 @@ class PostgresMetricStore:
         with self._pool.connection() as conn:
             rows = conn.execute(_OPEN_ALERTS).fetchall()
         return [_alert_from_row(row) for row in rows]
+
+    def enabled_rule_ids(self) -> set[int]:
+        with self._pool.connection() as conn:
+            return {rule_id for (rule_id,) in conn.execute(_ENABLED_RULE_IDS).fetchall()}
 
     def list_alerts(self, host: str | None, state: str | None, limit: int) -> AlertHistory:
         params = {"host": host, "state": state, "limit": limit + 1}

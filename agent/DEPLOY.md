@@ -162,6 +162,34 @@ sudo rm -rf /opt/pulse-agent /etc/pulse-agent
 sudo userdel pulse-agent
 ```
 
+## In a container
+
+`agent/Dockerfile` packages the agent as an image; mount a config file at
+`/etc/pulse-agent/config.yaml`:
+
+```bash
+docker build -t pulse-agent:dev agent        # from the repo root
+docker run -d --name pulse-agent --hostname web-1 \
+  -v /etc/pulse-agent/config.yaml:/etc/pulse-agent/config.yaml:ro pulse-agent:dev
+```
+
+- It runs as an unprivileged `pulse` user, so the config file must be
+  world-readable inside the container (`chmod 644`); keep the directory it
+  lives in private on the host instead. The image itself never contains a
+  config: `.dockerignore` lets in only `pyproject.toml` and `pulse_agent/`.
+- `docker stop` stops it within a second (it handles `SIGTERM`, which a
+  process running as PID 1 otherwise ignores).
+- **What it measures from inside a container:** disk usage and disk I/O
+  for the container's own filesystems, and network for the container's own
+  interfaces. CPU, load, and memory come from `/proc`, which a container
+  shares with the machine it runs on, so those are the *machine's*
+  readings, not the container's limits. That's fine for a test fleet; to
+  monitor a real server, run the agent on the server itself (above).
+
+`scripts/test-fleet.sh` uses this image to start a whole fleet of
+container "hosts" against a local API in one command; see
+`docs/ops-03-stability-run.md`.
+
 ## Troubleshooting
 
 | Symptom | Likely cause |

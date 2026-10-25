@@ -28,6 +28,10 @@ pulse-agent --config config.yaml --dry-run # log batches instead of sending them
 `POST /metrics`, and `api_key` must be one of the keys the API was started
 with (`PULSE_API_KEYS`). Use `--dry-run` to try the agent without a server.
 
+`SIGTERM` (what `docker stop`, systemd, and `kill` send) and `SIGINT`
+(Ctrl-C) stop it cleanly: it exits 0 at once if it's waiting between
+cycles, and logs how many buffered metrics, if any, never got delivered.
+
 ## Delivery
 
 `pulse_agent/sender.py` (`HttpSender`) posts each flush to the ingestion API
@@ -75,6 +79,15 @@ pytest
   with exponential backoff (capped at `max_backoff_seconds`). If the
   ingestion API is down long enough to exceed `buffer_max_batches`, the
   oldest metrics are dropped to keep the agent's memory bounded.
+- **Disks worth reporting.** `DiskUsageCollector` reports psutil's real
+  devices, minus mountpoints that are files (Docker bind-mounts
+  `/etc/hostname`, `/etc/hosts`, and `/etc/resolv.conf` into every
+  container, and psutil lists them as mounts of the host's disk), plus the
+  root filesystem `/` even when it's an overlay, as it is in a container.
+  `DiskIOCollector` skips `loop*` and `ram*` block devices: they report
+  zeros, and every container sees the host's, so they were more than half
+  of a host's series. All three were found running the agent in Docker
+  containers for OPS-03.
 - **`Sender`** is a small protocol (`send(metrics) -> bool`), so the
   collection and buffering code doesn't know how metrics are delivered.
   `HttpSender` is the real implementation; `LoggingSender` backs `--dry-run`.
@@ -106,3 +119,9 @@ pytest
 | --- | --- |
 | AGENT-12 hostname/tag/environment labeling | `pulse_agent/config.py` (`environment` field, `_validate_tags`), `pulse_agent/agent.py`, `config.example.yaml`, `tests/test_config.py`, `tests/test_agent.py` |
 | OPS-01 install/run instructions for a new host | `DEPLOY.md` |
+
+## Task mapping (Week 8)
+
+| Task | File(s) |
+| --- | --- |
+| OPS-03 stabilize against a test fleet | `Dockerfile`, `.dockerignore`, `pulse_agent/__main__.py` + `pulse_agent/agent.py` (clean stop on `SIGTERM`/`SIGINT`), `pulse_agent/collectors/disk.py` (container root, file mounts, virtual devices), `tests/test_agent.py`, `tests/test_disk.py`; `scripts/test-fleet.sh` and `docs/ops-03-stability-run.md` at the repo root |

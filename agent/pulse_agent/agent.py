@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import logging
-import time
+import threading
 
 from pulse_agent.buffer import MetricBuffer, Sender
 from pulse_agent.collectors.cpu import CPUCollector
@@ -36,6 +36,7 @@ class PulseAgent:
             timeout=config.request_timeout_seconds,
         )
         self.buffer = MetricBuffer(max_batches=config.buffer_max_batches)
+        self._stop = threading.Event()
         self.collectors = [
             CPUCollector(),
             LoadAverageCollector(),
@@ -70,10 +71,21 @@ class PulseAgent:
         self.buffer.flush(self.sender)
 
     def run_forever(self) -> None:
+        """Collect and flush every interval_seconds until stop() is called."""
         logger.info(
             "Pulse agent starting: host=%s endpoint=%s interval=%.1fs",
             self.config.hostname, self.config.endpoint, self.config.interval_seconds,
         )
-        while True:
+        while not self._stop.is_set():
             self.run_once()
-            time.sleep(self.config.interval_seconds)
+            self._stop.wait(self.config.interval_seconds)
+        # Metrics are flushed every cycle, so anything still here is what the
+        # API refused or couldn't be reached for; say so rather than drop it
+        # silently.
+        undelivered = f"; {len(self.buffer)} buffered metric(s) were not delivered" if len(self.buffer) else ""
+        logger.info("Pulse agent stopping%s", undelivered)
+
+    def stop(self) -> None:
+        """Make run_forever() return, at once if it's between cycles. Safe to
+        call from a signal handler."""
+        self._stop.set()

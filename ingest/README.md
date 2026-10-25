@@ -473,6 +473,20 @@ Design decisions:
   duplicate notifications). A partial unique index
   allows at most one open alert per rule and series, and each cycle's
   changes are written in one transaction.
+- **A restart doesn't count as the hosts going quiet.** While the API is
+  down (or can't reach the database), agents keep collecting and retry with
+  backoff of up to 60s, so for a while after it comes back every series'
+  latest sample can be over 30s old. Without a guard, the first cycle would
+  resolve each firing alert as `not_evaluated`, emailing "this is NOT a
+  recovery" for every one, and fire a fresh alert seconds later when the
+  buffered data landed. So for `CATCH_UP_SECONDS` (90s: the agents' longest
+  backoff, plus a reporting interval, plus margin) after the evaluator
+  starts or the database comes back, an **enabled** rule's alert that
+  isn't evaluated is held as it is. Alerts of a disabled or deleted rule
+  close immediately as usual, since that's an answer, not a data gap. The
+  cost: a host that really did die while the API was down is reported up
+  to 90s later than it otherwise would be. Found running the MVP against a
+  test fleet (OPS-03), where a 20s API restart did exactly this.
 - **A pending alert that recovers is deleted, not resolved.** It never
   fired, so it isn't history. Every resolved row is an alert that actually
   fired, which is what the alert history page (DASH-09) lists.
@@ -789,3 +803,4 @@ half-applied. To add one, create the next numbered file, e.g.
 | NOTIFY-02 Slack on fire and resolve | `pulse_ingest/notify.py` (`SlackConfig`, `build_slack_message`, `SlackChannel`, one `Notifier` thread per channel), `pulse_ingest/app.py` (`_notifier`), `tests/test_notify.py`, `tests/test_round_trip.py`, `tests/conftest.py` (`webhook_sink`) |
 | DASH-09 alert history (API side) | `pulse_ingest/store.py` (`list_alerts`, `AlertHistory`), `pulse_ingest/app.py` (`GET /alerts`), `tests/test_alert_store.py`, `tests/test_alert_endpoints.py`, `tests/fakes.py`; page in `dashboard/` |
 | OPS-02 end-to-end smoke test | `pulse_ingest/smoke.py` (also hosts the SMTP/webhook stand-ins the tests use), `scripts/smoke-test.sh`, `tests/test_smoke.py`, `tests/conftest.py` |
+| OPS-03 restart catch-up (found against a test fleet) | `pulse_ingest/alerts.py` (`CATCH_UP_SECONDS`, `RuleEvaluator` catching-up flag, `plan_transitions(hold_rule_ids=)`, `AlertTracker`), `pulse_ingest/store.py` (`enabled_rule_ids`), `tests/test_alerts.py`, `tests/test_alert_store.py`; the rest of OPS-03 is in `agent/`, `scripts/test-fleet.sh`, and `docs/ops-03-stability-run.md` |

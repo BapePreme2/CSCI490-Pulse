@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import os
+import re
 import time
 
 import psutil
@@ -9,13 +11,19 @@ from pulse_agent.metrics import Metric
 _BYTES_PER_GB = 1024**3
 _BYTES_PER_MB = 1024**2
 
+# Kernel block devices that aren't disks: loop devices (snaps, mounted
+# images) and the ramdisks. They exist on most Linux machines, every
+# container sees the host's, and they report zeros, so leaving them in made
+# up more than half of a host's series.
+_VIRTUAL_DEVICE = re.compile(r"(loop|ram)\d+")
+
 
 class DiskUsageCollector:
     """Collects per-mount disk usage percentage and free space."""
 
     def collect(self) -> list[Metric]:
         metrics: list[Metric] = []
-        for part in psutil.disk_partitions(all=False):
+        for part in _partitions():
             try:
                 usage = psutil.disk_usage(part.mountpoint)
             except (PermissionError, OSError):
@@ -24,6 +32,24 @@ class DiskUsageCollector:
             metrics.append(Metric(name="disk.usage", value=usage.percent, unit="percent", tags=tags))
             metrics.append(Metric(name="disk.free", value=usage.free / _BYTES_PER_GB, unit="GB", tags=tags))
         return metrics
+
+
+def _partitions() -> list:
+    """The mounted filesystems worth reporting.
+
+    psutil's all=False keeps real devices only, which is right on a normal
+    host but wrong in a container: there the root filesystem is an overlay,
+    which it leaves out, and Docker's bind-mounted single files
+    (/etc/hostname, /etc/hosts, /etc/resolv.conf) show up as "mounts" of
+    the host's disk instead. So files are skipped and the root filesystem is
+    always included.
+    """
+    parts = [p for p in psutil.disk_partitions(all=False) if not os.path.isfile(p.mountpoint)]
+    if not any(p.mountpoint == "/" for p in parts):
+        root = next((p for p in psutil.disk_partitions(all=True) if p.mountpoint == "/"), None)
+        if root is not None:
+            parts.insert(0, root)
+    return parts
 
 
 class DiskIOCollector:
@@ -48,7 +74,7 @@ class DiskIOCollector:
             if elapsed > 0:
                 for disk, current in counters.items():
                     previous = self._last_counters.get(disk)
-                    if previous is None:
+                    if previous is None or _VIRTUAL_DEVICE.fullmatch(disk):
                         continue
                     tags = {"device": disk}
                     read_rate = (current.read_bytes - previous.read_bytes) / elapsed

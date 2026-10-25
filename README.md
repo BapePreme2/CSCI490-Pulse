@@ -17,6 +17,10 @@ the full scope and schedule.
 - `dashboard/` — fleet and single-host dashboard (React). See
   `dashboard/README.md`.
 - `scripts/dev-db.sh` — starts/stops the local development Postgres (Docker).
+- `scripts/test-fleet.sh` — starts a fleet of agents in Docker containers,
+  each a separate host, against a local API (`up 3`, `down`, `stop fleet-2`,
+  ...). What running the MVP against it found and fixed is in
+  `docs/ops-03-stability-run.md`.
 - `scripts/smoke-test.sh` — end-to-end check of the whole pipeline (agent →
   API → alert → email + Slack) against a throwaway database; prints one line
   per check. See `ingest/README.md`.

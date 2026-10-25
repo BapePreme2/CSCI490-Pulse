@@ -1,4 +1,11 @@
 import logging
+import signal
+import subprocess
+import sys
+import threading
+import time
+
+import pytest
 
 from pulse_agent.__main__ import main
 from pulse_agent.agent import PulseAgent
@@ -124,3 +131,46 @@ def test_missing_config_exits_with_error(tmp_path, capsys):
 
     assert exit_code == 1
     assert "Config error" in capsys.readouterr().err
+
+
+def test_run_forever_returns_promptly_once_stopped_and_reports_undelivered_metrics(caplog):
+    sender = RecordingSender(succeed=False)
+    agent = make_agent(sender, interval_seconds=60)
+    thread = threading.Thread(target=agent.run_forever)
+
+    with caplog.at_level(logging.INFO, logger="pulse_agent.agent"):
+        thread.start()
+        deadline = time.monotonic() + 5
+        while not sender.batches and time.monotonic() < deadline:
+            time.sleep(0.01)
+        agent.stop()
+        thread.join(timeout=2)
+
+    assert not thread.is_alive(), "stop() should cut the 60s wait short"
+    assert "Pulse agent stopping; 1 buffered metric(s) were not delivered" in caplog.text
+
+
+@pytest.mark.parametrize("signum", [signal.SIGTERM, signal.SIGINT])
+def test_the_cli_exits_cleanly_on_sigterm_and_sigint(tmp_path, signum):
+    # What `docker stop`, systemd, and Ctrl-C send. Nothing listens on port 1,
+    # so the agent is mid-retry when the signal arrives.
+    config = tmp_path / "config.yaml"
+    config.write_text("endpoint: http://127.0.0.1:1/metrics\napi_key: k\nhostname: web-1\ninterval_seconds: 60\n")
+    proc = subprocess.Popen(
+        [sys.executable, "-m", "pulse_agent", "--config", str(config)],
+        stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
+    )
+    lines = []
+    for line in proc.stdout:
+        lines.append(line)
+        if "retrying in" in line:
+            break
+
+    started = time.monotonic()
+    proc.send_signal(signum)
+    output, _ = proc.communicate(timeout=5)
+
+    assert proc.returncode == 0, "".join(lines) + output
+    assert time.monotonic() - started < 3
+    assert "Pulse agent stopping; " in output
+    assert "Traceback" not in output

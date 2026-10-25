@@ -5,7 +5,7 @@ from dataclasses import replace
 import psycopg
 import pytest
 
-from pulse_ingest.alerts import AlertTracker, RuleEvaluator
+from pulse_ingest.alerts import CATCH_UP_SECONDS, AlertTracker, RuleEvaluator
 from pulse_ingest.migrate import apply_migrations
 from pulse_ingest.schemas import MetricBatch
 from pulse_ingest.store import Alert, AlertChange, AlertHistory, PostgresMetricStore
@@ -151,9 +151,12 @@ def alert_rows(db_url):
 
 
 def run_cycles(store, db_url, clock, samples, tracker=None):
-    """Report each (offset, value) sample, then evaluate once at that time."""
+    """Report each (offset, value) sample, then evaluate once at that time.
+
+    With no catch-up window: these are about an API that has been running a
+    while. The restart tests below set up their own evaluator."""
     tracker = tracker or AlertTracker(store)
-    evaluator = RuleEvaluator(store, tracker, clock=clock)
+    evaluator = RuleEvaluator(store, tracker, clock=clock, catch_up=0)
     for offset, value in samples:
         clock.now = TS + offset
         if value is not None:
@@ -203,6 +206,63 @@ def test_a_restarted_api_continues_open_alerts_instead_of_refiring(store, db_url
     run_cycles(store, db_url, clock, [(10, 96.0)], tracker=AlertTracker(store))
 
     assert alert_rows(db_url) == [("firing", TS, TS, None, None, 96.0)]
+
+
+def restarted_evaluator(store, clock):
+    """The evaluator a freshly started API runs, catch-up window included."""
+    return RuleEvaluator(store, AlertTracker(store), clock=clock)
+
+
+def evaluate_at(evaluator, clock, offset):
+    clock.now = TS + offset
+    evaluator.evaluate_once()
+
+
+def test_a_restart_that_leaves_a_gap_keeps_firing_alerts_until_the_backlog_lands(store, db_url):
+    # Found running the MVP against a test fleet (OPS-03): with the API down
+    # long enough that the last stored sample went stale, the restarted API
+    # resolved the alert as "not evaluated", then fired a new one when the
+    # agents' buffered samples arrived seconds later.
+    add_rule(db_url, duration=0)
+    clock = Clock(TS)
+    run_cycles(store, db_url, clock, [(0, 95.0), (10, 95.0)])
+
+    # Down from 10 to 50; the agent keeps collecting and backs off.
+    evaluator = restarted_evaluator(store, clock)
+    evaluate_at(evaluator, clock, 50)
+    evaluate_at(evaluator, clock, 60)
+    assert alert_rows(db_url) == [("firing", TS, TS, None, None, 95.0)]
+
+    for offset in (20, 30, 40, 50, 60):
+        report(store, 95.0, TS + offset)
+    evaluate_at(evaluator, clock, 65)
+
+    assert alert_rows(db_url) == [("firing", TS, TS, None, None, 95.0)]
+
+
+def test_a_host_that_stays_silent_after_a_restart_resolves_once_caught_up(store, db_url):
+    add_rule(db_url, duration=0)
+    clock = Clock(TS)
+    run_cycles(store, db_url, clock, [(0, 95.0)])
+
+    evaluator = restarted_evaluator(store, clock)
+    evaluate_at(evaluator, clock, 50)
+    evaluate_at(evaluator, clock, 50 + CATCH_UP_SECONDS - 1)
+    assert [row[0] for row in alert_rows(db_url)] == ["firing"]
+
+    evaluate_at(evaluator, clock, 50 + CATCH_UP_SECONDS)
+    assert alert_rows(db_url) == [("resolved", TS, TS, TS + 50 + CATCH_UP_SECONDS, "not_evaluated", 95.0)]
+
+
+def test_disabling_a_rule_right_after_a_restart_still_resolves_its_alerts_at_once(store, db_url):
+    add_rule(db_url, duration=0)
+    clock = Clock(TS)
+    run_cycles(store, db_url, clock, [(0, 95.0)])
+    query(db_url, "UPDATE alert_rules SET enabled = false RETURNING id")
+
+    evaluate_at(restarted_evaluator(store, clock), clock, 5)
+
+    assert alert_rows(db_url) == [("resolved", TS, TS, TS + 5, "not_evaluated", 95.0)]
 
 
 def test_a_new_breach_after_resolving_opens_a_new_alert(store, db_url):

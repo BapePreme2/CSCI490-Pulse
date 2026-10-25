@@ -1,0 +1,6 @@
+# Only pyproject.toml and pulse_agent/ go into the image. config.yaml in
+# particular holds a real API key and must never be baked into one.
+*
+!pyproject.toml
+!pulse_agent/
+pulse_agent/**/__pycache__
