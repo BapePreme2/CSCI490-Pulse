@@ -17,6 +17,9 @@ the full scope and schedule.
 - `dashboard/` — fleet and single-host dashboard (React). See
   `dashboard/README.md`.
 - `scripts/dev-db.sh` — starts/stops the local development Postgres (Docker).
+- `scripts/smoke-test.sh` — end-to-end check of the whole pipeline (agent →
+  API → alert → email + Slack) against a throwaway database; prints one line
+  per check. See `ingest/README.md`.
 
 Each subdirectory is its own project with its own dependencies.
 

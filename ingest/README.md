@@ -34,6 +34,9 @@ install -e .`) and skips itself if `agent/.venv` is missing. It checks that:
   (`PULSE_SMTP_*`, `PULSE_ALERT_EMAIL_*`, `PULSE_SLACK_WEBHOOK_URL`) are
   ignored, so the tests never email a real inbox or post to a real channel.
 
+For a quick check that a whole stack works, outside pytest, there's also
+the [smoke test](#smoke-test-ops-02).
+
 The database URL defaults to `postgresql://pulse:pulse@localhost:5432/pulse`
 (dev-only credentials); override it with `PULSE_DATABASE_URL`.
 
@@ -672,6 +675,64 @@ value recovered" explanation as the email). In Slack it reads like this:
   `fired_at` while still firing, which the dashboard computes so it keeps
   ticking between polls.
 
+## Smoke test (OPS-02)
+
+One command that checks the whole pipeline end to end, for before a demo or
+after changing anything that touches it:
+
+```bash
+scripts/smoke-test.sh            # from the repo root
+```
+
+It starts the real API and the real agent as separate processes against a
+scratch database, with local stand-ins for the mail server and the Slack
+webhook, and drives them only the way a deployment would: through the
+agent's config file, the REST API, and real SMTP and webhook deliveries.
+Each check prints a line; the exit code is 0 if all pass, 1 if one fails
+(it stops there and prints the tail of the API and agent logs), and 2 if the
+agent isn't installed.
+
+```
+Pulse smoke test: agent -> API -> Postgres -> alert -> email + Slack
+  ok      0.1s  scratch database pulse_smoke_9e7a658e created, 4 migrations applied
+  ok      0.0s  local SMTP server on :34255, Slack webhook stand-in on :38113
+  ok      0.3s  API healthy on :36043 (email and Slack notifications on)
+  ok      0.3s  agent reporting as smoke-host: online, 19 series stored
+  ok      0.0s  rule #1 created through POST /rules: memory.total > 0 for 3s on smoke-host
+  ok      3.3s  alert #1 firing 3.3s later, listed by GET /alerts
+  ok      0.0s  firing email and Slack message delivered: '[Pulse] FIRING: Smoke test on smoke-host (environment=smoke)'
+  ok      0.5s  threshold raised through PUT /rules; alert #1 resolved (recovered) after 0.5s
+  ok      0.0s  resolved email and Slack message delivered: '[Pulse] RESOLVED: Smoke test on smoke-host (environment=smoke)'
+  ok      2.0s  exactly one email and one Slack message per transition
+  ok      0.0s  rule deleted; alert #1 stays in the history
+PASS: 11 checks in 6.9s
+```
+
+How it differs from `tests/test_round_trip.py`, which covers similar
+ground inside pytest:
+
+- **Only public interfaces.** The rule is created, edited, and deleted with
+  `POST`/`PUT`/`DELETE /rules`, and every result is read back through
+  `GET /hosts` and `GET /alerts`, never with SQL. If the dashboard could
+  see it, the smoke test checks it the same way.
+- **A real recovery.** It resolves the alert by raising the rule's threshold
+  out of reach, so the value is genuinely back within it (`recovered`). The
+  round-trip test resolves by disabling the rule (`not_evaluated`), so
+  between them both paths get exercised end to end.
+- **Exactly once.** After the resolve it waits a few more evaluation cycles
+  and checks that exactly two emails and two Slack messages went out: none
+  for the pending step, and no duplicates.
+- **History survives.** Deleting the rule leaves the alert listed by
+  `GET /alerts` with `rule_id: null`.
+
+It never touches a real inbox, channel, or database: `PULSE_*` settings
+from your shell are ignored, the API gets its own random key, and the
+scratch database is dropped afterwards even when a check fails.
+`--timeout SECONDS` (default 30) sets how long each step may take, and
+`--agent PATH` runs a different `pulse-agent`. `tests/test_smoke.py` runs
+it as part of the test suite, including that a failure names the check,
+prints the logs, and still cleans up.
+
 ## Migrations
 
 `python -m pulse_ingest.migrate` applies each un-applied `migrations/*.sql`
@@ -725,5 +786,6 @@ half-applied. To add one, create the next numbered file, e.g.
 
 | Task | File(s) |
 | --- | --- |
-| DASH-09 alert history (API side) | `pulse_ingest/store.py` (`list_alerts`, `AlertHistory`), `pulse_ingest/app.py` (`GET /alerts`), `tests/test_alert_store.py`, `tests/test_alert_endpoints.py`, `tests/fakes.py`; page in `dashboard/` |
 | NOTIFY-02 Slack on fire and resolve | `pulse_ingest/notify.py` (`SlackConfig`, `build_slack_message`, `SlackChannel`, one `Notifier` thread per channel), `pulse_ingest/app.py` (`_notifier`), `tests/test_notify.py`, `tests/test_round_trip.py`, `tests/conftest.py` (`webhook_sink`) |
+| DASH-09 alert history (API side) | `pulse_ingest/store.py` (`list_alerts`, `AlertHistory`), `pulse_ingest/app.py` (`GET /alerts`), `tests/test_alert_store.py`, `tests/test_alert_endpoints.py`, `tests/fakes.py`; page in `dashboard/` |
+| OPS-02 end-to-end smoke test | `pulse_ingest/smoke.py` (also hosts the SMTP/webhook stand-ins the tests use), `scripts/smoke-test.sh`, `tests/test_smoke.py`, `tests/conftest.py` |
