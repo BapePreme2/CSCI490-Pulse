@@ -5,6 +5,7 @@ import {
   RuleValidationError,
   createRule,
   deleteRule,
+  fetchAlerts,
   fetchHostSummary,
   fetchHosts,
   fetchLatestMetrics,
@@ -286,5 +287,38 @@ describe("alert rule requests", () => {
 
     vi.stubGlobal("fetch", vi.fn().mockRejectedValue(new TypeError("network down")));
     await expect(deleteRule(1)).rejects.toThrow("Could not reach the ingestion API.");
+  });
+});
+
+describe("fetchAlerts", () => {
+  it("returns the whole response, since the page needs has_more and firing_count too", async () => {
+    const body = { alerts: [], has_more: true, firing_count: 2 };
+    mockFetch({ json: async () => body });
+
+    expect(await fetchAlerts()).toEqual(body);
+  });
+
+  it("requests /alerts with no query string when there are no filters", async () => {
+    const fetchMock = mockFetch({ json: async () => ({ alerts: [], has_more: false, firing_count: 0 }) });
+
+    await fetchAlerts();
+
+    expect(fetchMock).toHaveBeenCalledWith("http://localhost:8000/alerts");
+  });
+
+  it("sends the filters and limit, escaping the host", async () => {
+    const fetchMock = mockFetch({ json: async () => ({ alerts: [], has_more: false, firing_count: 0 }) });
+
+    await fetchAlerts({ host: "a b&c", state: "firing", limit: 200 });
+
+    expect(fetchMock).toHaveBeenCalledWith("http://localhost:8000/alerts?host=a+b%26c&state=firing&limit=200");
+  });
+
+  it("throws ApiError on a non-2xx status and when the API is unreachable", async () => {
+    mockFetch({ ok: false, status: 503 });
+    await expect(fetchAlerts()).rejects.toThrow(ApiError);
+
+    vi.stubGlobal("fetch", vi.fn().mockRejectedValue(new TypeError("Failed to fetch")));
+    await expect(fetchAlerts()).rejects.toThrow("Could not reach the ingestion API.");
   });
 });

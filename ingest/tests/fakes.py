@@ -1,4 +1,4 @@
-from pulse_ingest.store import AlertRule, UnknownHostError, WriteResult
+from pulse_ingest.store import AlertHistory, AlertRule, UnknownHostError, WriteResult
 
 
 class FakeStore:
@@ -10,6 +10,7 @@ class FakeStore:
         hosts: dict | None = None,
         host_summaries: list | None = None,
         known_hosts: set | None = None,
+        alert_history: AlertHistory | None = None,
     ):
         self.batches = []
         self.error = error
@@ -21,6 +22,9 @@ class FakeStore:
         self._known_hosts = known_hosts or set()
         self._rules: dict[int, AlertRule] = {}
         self._next_rule_id = 1
+        self._alert_history = alert_history or AlertHistory(alerts=[], has_more=False, firing_count=0)
+        # The (host, state, limit) of each list_alerts call.
+        self.alert_queries = []
 
     def write_batch(self, batch):
         if self.error:
@@ -54,6 +58,12 @@ class FakeStore:
         if self.error:
             raise self.error
         return self._hosts.get(host, {}).get("history", {}).get(name, [])
+
+    def list_alerts(self, host, state, limit):
+        if self.error:
+            raise self.error
+        self.alert_queries.append((host, state, limit))
+        return self._alert_history
 
     def list_rules(self):
         if self.error:

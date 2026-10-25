@@ -625,6 +625,53 @@ value recovered" explanation as the email). In Slack it reads like this:
 - One email (to every recipient) and one Slack message per transition.
   There are no per-rule recipients or channels, and no batching.
 
+## Alert history (DASH-09)
+
+**`GET /alerts`** lists the alerts that fired, for the dashboard's
+**Alerts** page. No API key, like the other dashboard endpoints.
+
+| Query param | Meaning |
+| --- | --- |
+| `host` | Only this host's alerts. An unknown host just matches nothing (`200`, empty). |
+| `state` | `firing` or `resolved`; omitted means both. Anything else is a `422`. |
+| `limit` | How many to return, 1-1000 (default 100). |
+
+```json
+{
+  "alerts": [
+    {"id": 2, "rule_id": 4, "rule_name": "Root disk", "host": "web-1",
+     "metric_name": "disk.usage", "unit": "percent", "tags": {"mount": "/"},
+     "operator": ">", "threshold": 90.0, "duration_seconds": 300,
+     "state": "resolved", "pending_since": 1792890902.0, "fired_at": 1792891204.0,
+     "resolved_at": 1792891629.0, "resolve_reason": "recovered",
+     "last_value": 71.5, "last_evaluated_at": 1792891629.0}
+  ],
+  "has_more": false,
+  "firing_count": 1
+}
+```
+
+- **Only alerts that fired.** Pending alerts haven't, and one that recovers
+  before firing is deleted (see [Alerts](#alerts-state-machine)), so every
+  entry is `firing` or `resolved`.
+- **Still-firing first,** then newest `fired_at` first. Alerts that fire in
+  the same evaluation cycle share `fired_at` exactly, so `id` breaks the tie
+  and the order never shuffles between requests.
+- **`has_more`** says more alerts match than `limit` let through (the query
+  fetches one extra row to find out). The dashboard's "Show more" asks again
+  with a bigger `limit` rather than paging with an offset, so alerts that
+  fire in the meantime can't shift a page and show something twice.
+- **`firing_count`** is how many alerts are firing right now on the
+  requested host (or fleet-wide without `host`), ignoring `state` and
+  `limit`. It's the metrics catalog's "Alerts currently firing" number, and
+  it lets a page filtered to resolved alerts still say what's on fire.
+- `rule_name`, the condition, and `tags` are the alert's own copies, so
+  entries still read correctly after the rule is edited or deleted
+  (`rule_id` is then `null`).
+- Duration isn't a field: it's `resolved_at - fired_at`, or now minus
+  `fired_at` while still firing, which the dashboard computes so it keeps
+  ticking between polls.
+
 ## Migrations
 
 `python -m pulse_ingest.migrate` applies each un-applied `migrations/*.sql`
@@ -678,4 +725,5 @@ half-applied. To add one, create the next numbered file, e.g.
 
 | Task | File(s) |
 | --- | --- |
+| DASH-09 alert history (API side) | `pulse_ingest/store.py` (`list_alerts`, `AlertHistory`), `pulse_ingest/app.py` (`GET /alerts`), `tests/test_alert_store.py`, `tests/test_alert_endpoints.py`, `tests/fakes.py`; page in `dashboard/` |
 | NOTIFY-02 Slack on fire and resolve | `pulse_ingest/notify.py` (`SlackConfig`, `build_slack_message`, `SlackChannel`, one `Notifier` thread per channel), `pulse_ingest/app.py` (`_notifier`), `tests/test_notify.py`, `tests/test_round_trip.py`, `tests/conftest.py` (`webhook_sink`) |

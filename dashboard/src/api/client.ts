@@ -1,7 +1,9 @@
 import type {
+  AlertHistoryResponse,
   AlertRule,
   AlertRuleInput,
   AlertRulesResponse,
+  AlertState,
   FleetHost,
   FleetHostsResponse,
   HistoryResponse,
@@ -164,4 +166,29 @@ export async function updateRule(id: number, rule: AlertRuleInput): Promise<Aler
 
 export async function deleteRule(id: number): Promise<void> {
   await ruleRequest(`/rules/${id}`, { method: "DELETE" });
+}
+
+export interface AlertFilters {
+  host?: string;
+  state?: AlertState;
+  limit?: number;
+}
+
+export async function fetchAlerts(filters: AlertFilters = {}): Promise<AlertHistoryResponse> {
+  const params = new URLSearchParams();
+  if (filters.host) params.set("host", filters.host);
+  if (filters.state) params.set("state", filters.state);
+  if (filters.limit !== undefined) params.set("limit", String(filters.limit));
+  const query = params.toString() ? `?${params.toString()}` : "";
+
+  let response: Response;
+  try {
+    response = await fetch(`${apiBaseUrl()}/alerts${query}`);
+  } catch {
+    throw new ApiError("Could not reach the ingestion API.", 0);
+  }
+  if (!response.ok) {
+    throw new ApiError(`Request failed with status ${response.status}`, response.status);
+  }
+  return (await response.json()) as AlertHistoryResponse;
 }

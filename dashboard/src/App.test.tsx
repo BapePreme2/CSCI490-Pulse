@@ -11,6 +11,7 @@ vi.mock("./api/client", () => ({
   fetchHostSummary: vi.fn().mockReturnValue(new Promise(() => {})),
   fetchHosts: vi.fn().mockReturnValue(new Promise(() => {})),
   fetchRules: vi.fn().mockReturnValue(new Promise(() => {})),
+  fetchAlerts: vi.fn().mockReturnValue(new Promise(() => {})),
 }));
 
 function renderAt(path: string) {
@@ -46,12 +47,20 @@ describe("App routing", () => {
     expect(screen.getByRole("heading", { name: "Alert rules" })).toBeInTheDocument();
   });
 
-  it("has header links to the fleet and the rules, marking the current one", () => {
+  it("renders the alert history at /alerts", () => {
+    renderAt("/alerts");
+
+    expect(screen.getByRole("heading", { name: "Alerts" })).toBeInTheDocument();
+  });
+
+  it("has header links to the fleet, the alerts, and the rules, marking the current one", () => {
     renderAt("/rules");
 
     const nav = screen.getByRole("navigation", { name: "Main" });
     expect(within(nav).getByRole("link", { name: "Fleet" })).toHaveAttribute("href", "/");
+    expect(within(nav).getByRole("link", { name: "Alerts" })).toHaveAttribute("href", "/alerts");
     expect(within(nav).getByRole("link", { name: "Alert rules" })).toHaveAttribute("aria-current", "page");
     expect(within(nav).getByRole("link", { name: "Fleet" })).not.toHaveAttribute("aria-current");
+    expect(within(nav).getByRole("link", { name: "Alerts" })).not.toHaveAttribute("aria-current");
   });
 });

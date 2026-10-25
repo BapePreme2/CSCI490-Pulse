@@ -139,7 +139,7 @@ WHERE x.latest_ts >= to_timestamp(%(since)s)
 ORDER BY x.rule_id, x.host_id, x.metric_id, x.tags, x.ts
 """
 
-_OPEN_ALERTS = """
+_ALERT_SELECT = """
 SELECT
     a.id, a.rule_id, a.host_id, h.hostname, a.unit, a.tags,
     a.rule_name, a.metric_name, a.operator, a.threshold, a.duration_seconds,
@@ -148,8 +148,28 @@ SELECT
     extract(epoch FROM a.last_evaluated_at)
 FROM alerts a
 JOIN hosts h ON h.id = a.host_id
-WHERE a.state <> 'resolved'
-ORDER BY a.id
+"""
+
+_OPEN_ALERTS = _ALERT_SELECT + "WHERE a.state <> 'resolved' ORDER BY a.id"
+
+# The alert history: every alert that fired (pending ones haven't, and a
+# pending alert that recovers is deleted, so it never shows up here).
+# Still-firing alerts come first, then the rest by when they fired; id
+# breaks ties, since alerts that fire in the same evaluation cycle share
+# fired_at exactly.
+_ALERT_HISTORY = _ALERT_SELECT + """
+WHERE a.state <> 'pending'
+  AND (%(host)s::text IS NULL OR h.hostname = %(host)s)
+  AND (%(state)s::text IS NULL OR a.state = %(state)s)
+ORDER BY a.state = 'firing' DESC, a.fired_at DESC, a.id DESC
+LIMIT %(limit)s
+"""
+
+_FIRING_COUNT = """
+SELECT count(*)
+FROM alerts a
+JOIN hosts h ON h.id = a.host_id
+WHERE a.state = 'firing' AND (%(host)s::text IS NULL OR h.hostname = %(host)s)
 """
 
 _INSERT_ALERT = """
@@ -320,6 +340,18 @@ class Alert:
 
 
 @dataclass(frozen=True)
+class AlertHistory:
+    """One page of the alert history (see QueryStore.list_alerts)."""
+
+    alerts: list[Alert]
+    # More alerts match than `limit` let through.
+    has_more: bool
+    # Alerts firing right now on the requested host(s), whatever `state` and
+    # `limit` were.
+    firing_count: int
+
+
+@dataclass(frozen=True)
 class AlertChange:
     """One alert transition to persist: `before` None inserts `after`,
     `after` None deletes `before`, and both present updates it."""
@@ -350,6 +382,11 @@ class QueryStore(Protocol):
 
     def get_history(self, host: str, name: str, start: float, end: float) -> list[HistorySeries]:
         """All samples for one metric name in [start, end], grouped into series by tags."""
+
+    def list_alerts(self, host: str | None, state: str | None, limit: int) -> AlertHistory:
+        """Up to `limit` alerts that fired (state "firing" or "resolved"),
+        still-firing first, then newest first. `host` and `state` narrow it
+        when given."""
 
 
 class RuleStore(Protocol):
@@ -555,33 +592,18 @@ class PostgresMetricStore:
     def open_alerts(self) -> list[Alert]:
         with self._pool.connection() as conn:
             rows = conn.execute(_OPEN_ALERTS).fetchall()
-        return [
-            Alert(
-                id=alert_id,
-                rule_id=rule_id,
-                host_id=host_id,
-                hostname=hostname,
-                unit=unit,
-                tags=tags,
-                rule_name=rule_name,
-                metric_name=metric_name,
-                operator=op,
-                threshold=threshold,
-                duration_seconds=duration,
-                state=state,
-                pending_since=float(pending_since),
-                fired_at=_epoch(fired_at),
-                resolved_at=_epoch(resolved_at),
-                resolve_reason=reason,
-                last_value=last_value,
-                last_evaluated_at=float(evaluated_at),
-            )
-            for (
-                alert_id, rule_id, host_id, hostname, unit, tags, rule_name, metric_name, op,
-                threshold, duration, state, pending_since, fired_at, resolved_at, reason,
-                last_value, evaluated_at,
-            ) in rows
-        ]
+        return [_alert_from_row(row) for row in rows]
+
+    def list_alerts(self, host: str | None, state: str | None, limit: int) -> AlertHistory:
+        params = {"host": host, "state": state, "limit": limit + 1}
+        with self._pool.connection() as conn:
+            rows = conn.execute(_ALERT_HISTORY, params).fetchall()
+            (firing_count,) = conn.execute(_FIRING_COUNT, params).fetchone()
+        return AlertHistory(
+            alerts=[_alert_from_row(row) for row in rows[:limit]],
+            has_more=len(rows) > limit,
+            firing_count=firing_count,
+        )
 
     def apply_alert_changes(self, changes: list[AlertChange]) -> list[AlertChange]:
         applied: list[AlertChange] = []
@@ -612,6 +634,34 @@ def _rule_from_row(row) -> AlertRule:
         enabled=enabled,
         created_at=float(created),
         updated_at=float(updated),
+    )
+
+
+def _alert_from_row(row) -> Alert:
+    (
+        alert_id, rule_id, host_id, hostname, unit, tags, rule_name, metric_name, op,
+        threshold, duration, state, pending_since, fired_at, resolved_at, reason,
+        last_value, evaluated_at,
+    ) = row
+    return Alert(
+        id=alert_id,
+        rule_id=rule_id,
+        host_id=host_id,
+        hostname=hostname,
+        unit=unit,
+        tags=tags,
+        rule_name=rule_name,
+        metric_name=metric_name,
+        operator=op,
+        threshold=threshold,
+        duration_seconds=duration,
+        state=state,
+        pending_since=float(pending_since),
+        fired_at=_epoch(fired_at),
+        resolved_at=_epoch(resolved_at),
+        resolve_reason=reason,
+        last_value=last_value,
+        last_evaluated_at=float(evaluated_at),
     )
 
 

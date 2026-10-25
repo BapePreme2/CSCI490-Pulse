@@ -1,12 +1,14 @@
 """The alert state machine against real Postgres: persistence and full cycles."""
 
+from dataclasses import replace
+
 import psycopg
 import pytest
 
 from pulse_ingest.alerts import AlertTracker, RuleEvaluator
 from pulse_ingest.migrate import apply_migrations
 from pulse_ingest.schemas import MetricBatch
-from pulse_ingest.store import Alert, AlertChange, PostgresMetricStore
+from pulse_ingest.store import Alert, AlertChange, AlertHistory, PostgresMetricStore
 
 pytestmark = pytest.mark.integration
 
@@ -210,3 +212,76 @@ def test_a_new_breach_after_resolving_opens_a_new_alert(store, db_url):
     run_cycles(store, db_url, clock, [(0, 95.0), (10, 40.0), (20, 95.0)])
 
     assert [row[0] for row in alert_rows(db_url)] == ["resolved", "firing"]
+
+
+# --- the alert history (DASH-09) ---
+
+
+def insert(store, db_url, rule_id, **overrides):
+    (applied,) = store.apply_alert_changes([AlertChange("inserted", None, new_alert(db_url, rule_id, **overrides))])
+    return applied.after
+
+
+def firing_alert(store, db_url, rule_id, fired_at, core, **overrides):
+    return insert(store, db_url, rule_id, state="firing", fired_at=fired_at, tags={"core": core}, **overrides)
+
+
+def resolved_alert(store, db_url, rule_id, fired_at, reason="recovered", **overrides):
+    return insert(
+        store, db_url, rule_id, state="resolved", fired_at=fired_at, resolved_at=fired_at + 60,
+        resolve_reason=reason, **overrides,
+    )
+
+
+def test_history_lists_fired_alerts_firing_first_then_newest_first(store, db_url):
+    report(store, 91.5, TS, core="0")
+    rule_id = add_rule(db_url)
+    insert(store, db_url, rule_id, tags={"core": "9"})  # pending: it hasn't fired, so it isn't history
+    old = resolved_alert(store, db_url, rule_id, fired_at=TS - 3000)
+    recent = resolved_alert(store, db_url, rule_id, fired_at=TS - 100, reason="not_evaluated")
+    firing = firing_alert(store, db_url, rule_id, fired_at=TS - 5000, core="1")
+    # Fired in the same evaluation cycle as `recent`, so the same fired_at.
+    same_cycle = resolved_alert(store, db_url, rule_id, fired_at=TS - 100)
+
+    history = store.list_alerts(None, None, 100)
+
+    assert history.alerts == [firing, same_cycle, recent, old]
+    assert (history.has_more, history.firing_count) == (False, 1)
+
+
+def test_history_filters_by_host_and_state(store, db_url):
+    report(store, 91.5, TS, core="0")
+    report(store, 91.5, TS, host="db-1", core="0")
+    rule_id = add_rule(db_url)
+    web_firing = firing_alert(store, db_url, rule_id, fired_at=TS, core="0")
+    web_resolved = resolved_alert(store, db_url, rule_id, fired_at=TS - 600)
+    firing_alert(store, db_url, rule_id, fired_at=TS, core="0", host_id=host_id(db_url, "db-1"), hostname="db-1")
+
+    assert store.list_alerts("web-1", None, 100).alerts == [web_firing, web_resolved]
+    assert store.list_alerts(None, "resolved", 100).alerts == [web_resolved]
+    # The firing count ignores the state filter, so a page showing only
+    # resolved alerts can still say how many are firing.
+    assert store.list_alerts("db-1", "resolved", 100) == AlertHistory([], has_more=False, firing_count=1)
+    assert store.list_alerts(None, "firing", 100).firing_count == 2
+    assert store.list_alerts("ghost", None, 100) == AlertHistory([], has_more=False, firing_count=0)
+
+
+def test_history_is_limited_and_says_when_there_is_more(store, db_url):
+    report(store, 91.5, TS, core="0")
+    rule_id = add_rule(db_url)
+    alerts = [resolved_alert(store, db_url, rule_id, fired_at=TS - i) for i in range(3)]
+
+    two, three = store.list_alerts(None, None, 2), store.list_alerts(None, None, 3)
+
+    assert (two.alerts, two.has_more) == (alerts[:2], True)
+    assert (three.alerts, three.has_more) == (alerts, False)
+
+
+def test_history_keeps_alerts_whose_rule_was_deleted(store, db_url):
+    report(store, 91.5, TS, core="0")
+    rule_id = add_rule(db_url)
+    alert = resolved_alert(store, db_url, rule_id, fired_at=TS - 600)
+
+    query(db_url, "DELETE FROM alert_rules WHERE id = %s RETURNING id", (rule_id,))
+
+    assert store.list_alerts(None, None, 100).alerts == [replace(alert, rule_id=None)]

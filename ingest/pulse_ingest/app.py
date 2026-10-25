@@ -5,6 +5,7 @@ import os
 import time
 from collections.abc import Iterable
 from contextlib import asynccontextmanager
+from typing import Literal
 
 import psycopg
 from fastapi import FastAPI, HTTPException, Query, Request, Response, status
@@ -18,7 +19,7 @@ from pulse_ingest.auth import extract_bearer_token, is_valid_key, load_api_keys
 from pulse_ingest.migrate import database_url
 from pulse_ingest.notify import SLACK_ENV_VAR, Channel, EmailChannel, EmailConfig, Notifier, SlackChannel, SlackConfig
 from pulse_ingest.schemas import AlertRuleIn, MetricBatch
-from pulse_ingest.store import AlertRule, HostSummary, PostgresMetricStore, Store, UnknownHostError
+from pulse_ingest.store import Alert, AlertRule, HostSummary, PostgresMetricStore, Store, UnknownHostError
 
 # uvicorn configures only its own loggers (uvicorn/uvicorn.access/uvicorn.error);
 # the root logger otherwise has no handler and a default level of WARNING, so
@@ -33,6 +34,9 @@ AGENT_PATHS = {"/metrics"}
 
 DEFAULT_HISTORY_RANGE_SECONDS = 3600
 MAX_HISTORY_RANGE_SECONDS = 30 * 24 * 3600
+
+DEFAULT_ALERT_LIMIT = 100
+MAX_ALERT_LIMIT = 1000
 
 
 def _alert_interval() -> float:
@@ -292,6 +296,24 @@ def create_app(
         logger.info("Alert rule %d deleted", rule_id)
         return Response(status_code=status.HTTP_204_NO_CONTENT)
 
+    # --- alert history (DASH-09). No API key, like the endpoints above.
+
+    @app.get("/alerts")
+    def alert_history(
+        host: str | None = Query(None, description="Only this host's alerts"),
+        state: Literal["firing", "resolved"] | None = Query(None, description="Only alerts in this state"),
+        limit: int = Query(DEFAULT_ALERT_LIMIT, ge=1, le=MAX_ALERT_LIMIT),
+    ) -> dict:
+        try:
+            history = store.list_alerts(host, state, limit)
+        except (psycopg.OperationalError, PoolTimeout):
+            raise _database_unavailable()
+        return {
+            "alerts": [_alert_dict(a) for a in history.alerts],
+            "has_more": history.has_more,
+            "firing_count": history.firing_count,
+        }
+
     return app
 
 
@@ -323,6 +345,28 @@ def _rule_dict(r: AlertRule) -> dict:
         "enabled": r.enabled,
         "created_at": r.created_at,
         "updated_at": r.updated_at,
+    }
+
+
+def _alert_dict(a: Alert) -> dict:
+    return {
+        "id": a.id,
+        "rule_id": a.rule_id,
+        "rule_name": a.rule_name,
+        "host": a.hostname,
+        "metric_name": a.metric_name,
+        "unit": a.unit,
+        "tags": a.tags,
+        "operator": a.operator,
+        "threshold": a.threshold,
+        "duration_seconds": a.duration_seconds,
+        "state": a.state,
+        "pending_since": a.pending_since,
+        "fired_at": a.fired_at,
+        "resolved_at": a.resolved_at,
+        "resolve_reason": a.resolve_reason,
+        "last_value": a.last_value,
+        "last_evaluated_at": a.last_evaluated_at,
     }
 
 

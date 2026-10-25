@@ -32,9 +32,10 @@ npm run build
 
 - `src/main.tsx` -- entry point; mounts `<App>` inside `BrowserRouter`.
 - `src/App.tsx` -- routes: `/` (fleet overview), `/hosts/:hostname` (a
-  single host's page), and `/rules` (alert rules).
+  single host's page), `/alerts` (alert history), and `/rules` (alert
+  rules).
 - `src/layout/AppShell.tsx` -- shared header + content area every route
-  renders inside. The header's nav (`Fleet`, `Alert rules`) uses `NavLink`,
+  renders inside. The header's nav (`Fleet`, `Alerts`, `Alert rules`) uses `NavLink`,
   so the current page's link gets `aria-current="page"` and the accent
   color.
 - `src/routes/FleetOverviewPage.tsx` -- every known host from `GET /hosts`,
@@ -107,6 +108,28 @@ npm run build
   `deleteRule`. A `422` becomes a `RuleValidationError` listing each field
   the API objected to; a `404` on edit/delete means the rule was deleted
   elsewhere and says so.
+
+- `src/routes/AlertsPage.tsx` -- the alert history (DASH-09), from
+  `GET /alerts`: every alert that fired, still-firing first, as a card with
+  a colored edge and badge for what happened (red **Firing**, green
+  **Resolved**, amber **No longer evaluated**, the same colors as the Slack
+  messages), the rule's condition, the series, the latest or last value,
+  when it fired and resolved ("5m ago", exact time on hover), and how long
+  it fired. A still-firing alert's duration reads "so far" and ticks up on
+  every poll. A no-longer-evaluated alert says plainly that it did **not**
+  recover. Above the list: how many alerts are firing now, a state filter
+  (All / Firing / Resolved) and a host picker. The filters live in the URL
+  (`/alerts?state=firing&host=web-1`), so a filtered view can be linked to
+  and the back button undoes a change; changing one starts again from a
+  loading state rather than briefly showing the old results. It polls every
+  `ALERTS_POLL_INTERVAL_MS` (5s) with the fleet page's first-load-only error
+  pattern. "Show more" asks for 100 more at a time, up to the API's cap of
+  1000.
+- `src/alerts/format.ts` -- `alertOutcome` (firing / recovered /
+  not_evaluated), `firingSeconds`, `describeSeries` (`cpu.usage{core=0}`,
+  the notifications' format), and `formatAlertValue`.
+- `src/api/client.ts` also has `fetchAlerts({host, state, limit})`, which
+  returns the whole response (`alerts`, `has_more`, `firing_count`).
 
 The dashboard calls the ingest API directly from the browser (a different
 origin in dev), which needs the API's CORS support -- see
@@ -205,3 +228,21 @@ horizontal scroll at 360px. That pass caught two things no unit test
 could: the host picker was clipped because the form grid made five columns
 for four fields at desktop width, and placeholder text like `80` looked
 like a value that was already filled in (now `e.g. 80`).
+
+## Task mapping (Week 8)
+
+| Task | File(s) |
+| --- | --- |
+| DASH-09 alert history page | `src/routes/AlertsPage.tsx`, `src/alerts/format.ts`, `src/api/client.ts` (`fetchAlerts`), `src/api/types.ts` (`Alert`), `src/layout/AppShell.tsx` (nav), `src/App.tsx`, `src/index.css` (`.alert-*`); API side in `ingest/` |
+
+Checked in headless Chromium against the real API, two real agents, and a
+synthetic host driven into every outcome: an alert still firing, one that
+recovered, and two closed as no longer evaluated by disabling and then
+deleting their rule. Also checked: the state and host filters (including
+the back button), the host links, the firing duration ticking up between
+polls, both color schemes, and no horizontal scroll at 360px. The
+screenshots caught what the unit tests couldn't: a tagged series like
+`memory.total{environment=demo}` was squeezed into one narrow grid cell and
+broke mid-word, so the series now gets its own full-width row, and on a
+phone every fact stacked in a single column until the cells were allowed
+to go down to 120px for two columns.

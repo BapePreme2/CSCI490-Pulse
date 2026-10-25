@@ -12,6 +12,9 @@ export function AppShell({ children }: { children: ReactNode }) {
           <NavLink to="/" end className="app-nav-link">
             Fleet
           </NavLink>
+          <NavLink to="/alerts" className="app-nav-link">
+            Alerts
+          </NavLink>
           <NavLink to="/rules" className="app-nav-link">
             Alert rules
           </NavLink>

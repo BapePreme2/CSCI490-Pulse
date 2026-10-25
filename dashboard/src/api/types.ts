@@ -74,3 +74,42 @@ export interface AlertRule extends AlertRuleInput {
 export interface AlertRulesResponse {
   rules: AlertRule[];
 }
+
+/** Only alerts that fired are history; pending ones aren't returned. */
+export type AlertState = "firing" | "resolved";
+
+/** "recovered": back within the threshold. "not_evaluated": Pulse stopped
+ * evaluating it (host went quiet, or the rule was disabled/changed/deleted). */
+export type ResolveReason = "recovered" | "not_evaluated";
+
+/** One entry of GET /alerts. The rule's name and condition are as of the
+ * alert's last evaluation, so they still read right after the rule changes. */
+export interface Alert {
+  id: number;
+  /** null once the rule has been deleted. */
+  rule_id: number | null;
+  rule_name: string;
+  host: string;
+  metric_name: string;
+  unit: string;
+  tags: Record<string, string>;
+  operator: Operator;
+  threshold: number;
+  duration_seconds: number;
+  state: AlertState;
+  pending_since: number;
+  fired_at: number;
+  resolved_at: number | null;
+  resolve_reason: ResolveReason | null;
+  last_value: number;
+  last_evaluated_at: number;
+}
+
+export interface AlertHistoryResponse {
+  /** Still-firing first, then newest first. */
+  alerts: Alert[];
+  /** More alerts match than the requested limit. */
+  has_more: boolean;
+  /** Alerts firing now on the requested host(s), regardless of the state filter. */
+  firing_count: number;
+}
