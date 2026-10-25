@@ -16,7 +16,7 @@ from pulse_ingest import __version__
 from pulse_ingest.alerts import DEFAULT_INTERVAL_SECONDS, AlertTracker, RuleEvaluator
 from pulse_ingest.auth import extract_bearer_token, is_valid_key, load_api_keys
 from pulse_ingest.migrate import database_url
-from pulse_ingest.notify import EmailChannel, EmailConfig, Notifier
+from pulse_ingest.notify import SLACK_ENV_VAR, Channel, EmailChannel, EmailConfig, Notifier, SlackChannel, SlackConfig
 from pulse_ingest.schemas import AlertRuleIn, MetricBatch
 from pulse_ingest.store import AlertRule, HostSummary, PostgresMetricStore, Store, UnknownHostError
 
@@ -40,15 +40,24 @@ def _alert_interval() -> float:
 
 
 def _notifier() -> Notifier | None:
+    channels: list[Channel] = []
     email = EmailConfig.from_env()
     if email is None:
         logger.info("Email notifications off (PULSE_SMTP_HOST not set)")
-        return None
-    logger.info(
-        "Email notifications on: alerts go to %s via %s:%d (%s)",
-        ", ".join(email.recipients), email.host, email.port, email.security,
-    )
-    return Notifier([EmailChannel(email)])
+    else:
+        logger.info(
+            "Email notifications on: alerts go to %s via %s:%d (%s)",
+            ", ".join(email.recipients), email.host, email.port, email.security,
+        )
+        channels.append(EmailChannel(email))
+    slack = SlackConfig.from_env()
+    if slack is None:
+        logger.info("Slack notifications off (%s not set)", SLACK_ENV_VAR)
+    else:
+        # Only the host: the rest of the URL is the webhook's secret.
+        logger.info("Slack notifications on: alerts post to the webhook at %s", slack.host)
+        channels.append(SlackChannel(slack))
+    return Notifier(channels) if channels else None
 
 
 def _default_cors_origins() -> list[str]:

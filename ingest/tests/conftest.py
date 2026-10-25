@@ -1,7 +1,10 @@
 import email
 import email.policy
+import json
 import socket
+import threading
 import uuid
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 import psycopg
 import pytest
@@ -63,3 +66,43 @@ def smtp_sink():
     sink.port = controller.port
     yield sink
     controller.stop()
+
+
+class WebhookSink:
+    """What a local stand-in for a Slack incoming webhook received: each
+    POST's path, Content-Type, and JSON body."""
+
+    def __init__(self):
+        self.requests = []
+        self.reply = (200, "ok")
+
+    @property
+    def payloads(self):
+        return [body for _, _, body in self.requests]
+
+
+@pytest.fixture
+def webhook_sink():
+    """A real HTTP server on localhost. `.url` has a made-up secret path like
+    a real webhook's; set `.reply` to (status, body) to answer differently."""
+    sink = WebhookSink()
+
+    class Handler(BaseHTTPRequestHandler):
+        def do_POST(self):
+            body = self.rfile.read(int(self.headers["Content-Length"]))
+            sink.requests.append((self.path, self.headers["Content-Type"], json.loads(body)))
+            status, text = sink.reply
+            self.send_response(status)
+            self.send_header("Content-Type", "text/plain")
+            self.end_headers()
+            self.wfile.write(text.encode())
+
+        def log_message(self, format, *args):
+            pass
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    sink.url = f"http://127.0.0.1:{server.server_address[1]}/services/T000/B000/secret-token"
+    yield sink
+    server.shutdown()
+    server.server_close()

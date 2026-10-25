@@ -1,3 +1,4 @@
+import json
 import logging
 import smtplib
 import socket
@@ -8,7 +9,17 @@ from dataclasses import replace
 import pytest
 from aiosmtpd.smtp import AuthResult
 
-from pulse_ingest.notify import EmailChannel, EmailConfig, Notifier, build_email
+from pulse_ingest.app import _notifier
+from pulse_ingest.notify import (
+    NOTIFY_ENV_VARS,
+    EmailChannel,
+    EmailConfig,
+    Notifier,
+    SlackChannel,
+    SlackConfig,
+    build_email,
+    build_slack_message,
+)
 from pulse_ingest.store import Alert, AlertChange
 
 from .conftest import SmtpSink, start_smtp_server
@@ -365,21 +376,51 @@ def test_delivers_fired_and_resolved_to_every_channel_in_order():
     assert email.sent == other.sent == [("fired", 12, 99.0), ("resolved", 12, 99.0)]
 
 
-def test_a_failed_send_is_retried_then_given_up_without_blocking_other_channels(caplog):
-    broken, working = FakeChannel("broken", failures=99), FakeChannel("working")
+def test_a_failed_send_is_retried_then_given_up(caplog):
+    broken = FakeChannel("broken", failures=99)
 
     with caplog.at_level(logging.INFO, logger="pulse_ingest.notify"):
-        run(Notifier([broken, working], retry_delays=(0.01, 0.01)), fired())
+        run(Notifier([broken], retry_delays=(0.01, 0.01)), fired())
 
-    assert (broken.attempts, len(working.sent)) == (3, 1)
+    assert broken.attempts == 3
     messages = [r.getMessage() for r in caplog.records]
     assert messages == [
         "broken notification for alert 12 (fired) failed, retrying in 0.01s: attempt 1 refused",
         "broken notification for alert 12 (fired) failed, retrying in 0.01s: attempt 2 refused",
         "Giving up on broken notification for alert 12 (fired) after 3 attempts: attempt 3 refused",
-        "Sent working notification for alert 12 (fired)",
     ]
     assert caplog.records[2].levelname == "ERROR"
+
+
+def eventually(condition, timeout=2.0):
+    deadline = time.monotonic() + timeout
+    while not condition():
+        if time.monotonic() > deadline:
+            return False
+        time.sleep(0.01)
+    return True
+
+
+def test_a_stuck_channel_does_not_hold_up_the_others():
+    gate = threading.Event()
+
+    class StuckChannel(FakeChannel):
+        def send(self, change, now):
+            gate.wait(5)
+            super().send(change, now)
+
+    stuck, working = StuckChannel("stuck"), FakeChannel("working")
+    notifier = Notifier([stuck, working])
+    notifier.start()
+    notifier(fired())
+    notifier(resolved())
+
+    delivered = eventually(lambda: len(working.sent) == 2)
+    gate.set()
+    notifier.stop()
+
+    assert delivered, "the working channel waited for the stuck one"
+    assert [kind for kind, _, _ in stuck.sent] == ["fired", "resolved"]
 
 
 def test_a_send_that_succeeds_on_retry_is_delivered_once():
@@ -431,4 +472,189 @@ def test_drops_notifications_beyond_the_queue_limit(caplog):
     notifier(fired())
     notifier(resolved())
 
-    assert "Notification queue full; dropped resolved notification for alert 12" in caplog.text
+    assert "fake notification queue full; dropped resolved notification for alert 12" in caplog.text
+
+
+# --- Slack: configuration ---
+
+WEBHOOK = "https://hooks.slack.com/services/T000/B000/secret-token"
+
+
+@pytest.mark.parametrize("env", [{}, {"PULSE_SLACK_WEBHOOK_URL": "  "}])
+def test_slack_is_off_when_not_configured(env):
+    assert SlackConfig.from_env(env) is None
+
+
+def test_slack_config_keeps_the_webhook_secret_out_of_its_repr():
+    c = SlackConfig.from_env({"PULSE_SLACK_WEBHOOK_URL": f" {WEBHOOK} "})
+
+    assert (c.webhook_url, c.host) == (WEBHOOK, "hooks.slack.com")
+    assert "secret-token" not in repr(c)
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        "hooks.slack.com/services/T000/B000/secret-token",
+        "ftp://hooks.slack.com/services/T000/B000/secret-token",
+        "https:///services/T000/B000/secret-token",
+        "secret-token",
+    ],
+)
+def test_slack_webhook_must_be_a_url_and_the_error_does_not_repeat_it(url):
+    with pytest.raises(ValueError, match="must be a webhook URL starting with https://") as error:
+        SlackConfig.from_env({"PULSE_SLACK_WEBHOOK_URL": url})
+
+    assert "secret-token" not in str(error.value)
+
+
+def test_warns_when_the_webhook_url_would_go_unencrypted(caplog):
+    with caplog.at_level(logging.WARNING, logger="pulse_ingest.notify"):
+        SlackConfig.from_env({"PULSE_SLACK_WEBHOOK_URL": "http://chat.internal/hooks/secret-token"})
+
+    assert "is http://, so the webhook URL (its secret) is sent unencrypted" in caplog.text
+    assert "secret-token" not in caplog.text
+
+
+def test_the_api_notifies_through_whichever_channels_are_configured(monkeypatch, caplog):
+    for name in NOTIFY_ENV_VARS:
+        monkeypatch.delenv(name, raising=False)
+
+    assert _notifier() is None
+
+    monkeypatch.setenv("PULSE_SLACK_WEBHOOK_URL", WEBHOOK)
+    with caplog.at_level(logging.INFO, logger="pulse_ingest.app"):
+        assert isinstance(_notifier(), Notifier)
+
+    assert "Email notifications off" in caplog.text
+    assert "Slack notifications on: alerts post to the webhook at hooks.slack.com" in caplog.text
+    assert "secret-token" not in caplog.text
+
+
+# --- Slack: the messages ---
+
+
+def fields(message):
+    (attachment,) = message["attachments"]
+    return [f["text"] for f in attachment["blocks"][1]["fields"]]
+
+
+def test_fired_slack_message():
+    assert build_slack_message(fired()) == {
+        "text": "[Pulse] FIRING: High CPU on web-1 (core=0)",
+        "attachments": [
+            {
+                "color": "#dc2626",
+                "blocks": [
+                    {"type": "section", "text": {"type": "mrkdwn", "text": "High CPU is FIRING on web-1."}},
+                    {
+                        "type": "section",
+                        "fields": [
+                            {"type": "mrkdwn", "text": "*Series*\ncpu.usage{core=0}"},
+                            {"type": "mrkdwn", "text": "*Value*\n95.5 percent"},
+                            {"type": "mrkdwn", "text": "*Condition*\ncpu.usage &gt; 80 for 5m"},
+                            {"type": "mrkdwn", "text": "*Breaching since*\n2026-10-19 08:48:20 UTC"},
+                            {"type": "mrkdwn", "text": "*Fired at*\n2026-10-19 08:53:20 UTC"},
+                        ],
+                    },
+                    {"type": "context", "elements": [{"type": "mrkdwn", "text": "Alert #12, rule #3."}]},
+                ],
+            }
+        ],
+    }
+
+
+def test_recovered_slack_message_is_green_and_says_how_long_it_fired():
+    m = build_slack_message(resolved("recovered", after_seconds=3725))
+
+    assert m["text"] == "[Pulse] RESOLVED: High CPU on web-1 (core=0)"
+    assert m["attachments"][0]["color"] == "#16a34a"
+    assert fields(m)[1] == "*Value*\n41 percent"
+    assert fields(m)[-2:] == ["*Resolved at*\n2026-10-19 09:55:25 UTC", "*Firing for*\n1h 2m 5s"]
+
+
+def test_not_evaluated_slack_message_is_amber_and_says_it_did_not_recover():
+    m = build_slack_message(resolved("not_evaluated", rule_id=None))
+
+    assert m["text"] == "[Pulse] RESOLVED (no longer evaluated): High CPU on web-1 (core=0)"
+    (attachment,) = m["attachments"]
+    assert attachment["color"] == "#b45309"
+    assert "NOT because the value recovered" in attachment["blocks"][0]["text"]["text"]
+    assert fields(m)[1] == "*Last value seen*\n41 percent"
+    assert attachment["blocks"][2]["elements"][0]["text"] == "Alert #12, rule since deleted."
+
+
+def test_names_cannot_mention_the_channel_or_add_links():
+    change = fired(rule_name="<!channel> & <https://evil.example|Click>", hostname="<@U123>")
+
+    m = build_slack_message(change)
+
+    assert m["text"] == (
+        "[Pulse] FIRING: &lt;!channel&gt; &amp; &lt;https://evil.example|Click&gt; on &lt;@U123&gt; (core=0)"
+    )
+    assert "<" not in json.dumps(m)
+
+
+def test_long_values_are_cut_to_fit_slacks_limits():
+    # 20 tags of the longest allowed size, full of a character Slack needs escaped.
+    tags = {f"{i:02d}" + "k" * 198: "&" * 200 for i in range(20)}
+
+    m = build_slack_message(fired(tags=tags, rule_name="&" * 200, hostname="h" * 255))
+
+    summary = m["attachments"][0]["blocks"][0]["text"]["text"]
+    assert len(summary) <= 3000
+    assert all(len(text) <= 2000 for text in fields(m))
+    assert fields(m)[0].endswith("&amp;…")  # cut between escapes, never inside one
+
+
+# --- Slack: sending ---
+
+
+def test_posts_the_message_as_json_to_the_webhook(webhook_sink):
+    SlackChannel(SlackConfig(webhook_sink.url)).send(fired(), FIRED_AT)
+
+    ((path, content_type, payload),) = webhook_sink.requests
+    assert path == "/services/T000/B000/secret-token"
+    assert content_type == "application/json"
+    assert payload == build_slack_message(fired())
+
+
+def test_non_ascii_names_survive_the_post(webhook_sink):
+    change = fired(rule_name="Température élevée 🔥", hostname="serveur-é")
+
+    SlackChannel(SlackConfig(webhook_sink.url)).send(change, FIRED_AT)
+
+    assert webhook_sink.payloads[0]["text"] == "[Pulse] FIRING: Température élevée 🔥 on serveur-é (core=0)"
+
+
+def test_a_rejected_post_raises_with_slacks_reason_but_not_the_url(webhook_sink):
+    webhook_sink.reply = (404, "no_service")
+
+    with pytest.raises(RuntimeError, match="^Slack answered 404: no_service$") as error:
+        SlackChannel(SlackConfig(webhook_sink.url)).send(fired(), FIRED_AT)
+
+    assert "secret-token" not in str(error.value)
+
+
+def test_an_unreachable_webhook_raises_without_revealing_the_url():
+    with socket.socket() as s:
+        s.bind(("127.0.0.1", 0))
+        port = s.getsockname()[1]
+
+    with pytest.raises(OSError) as error:
+        SlackChannel(SlackConfig(f"http://127.0.0.1:{port}/services/T000/B000/secret-token")).send(fired(), FIRED_AT)
+
+    assert "secret-token" not in str(error.value)
+
+
+def test_failed_slack_posts_are_retried_and_logged_without_the_url(webhook_sink, caplog):
+    webhook_sink.reply = (500, "server_error")
+
+    run(Notifier([SlackChannel(SlackConfig(webhook_sink.url))], retry_delays=(0.01,)), fired())
+
+    assert len(webhook_sink.requests) == 2
+    assert (
+        "Giving up on slack notification for alert 12 (fired) after 2 attempts: Slack answered 500: server_error"
+        in caplog.text
+    )
+    assert "secret-token" not in caplog.text

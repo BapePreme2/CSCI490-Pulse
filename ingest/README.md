@@ -29,9 +29,10 @@ install -e .`) and skips itself if `agent/.venv` is missing. It checks that:
   API starts (the agent's retry buffer, across real processes);
 - a wrong API key stores nothing while the agent keeps retrying;
 - a rule fires from live agent data, and the API emails the fire and then
-  the resolve to a throwaway local SMTP server. `PULSE_SMTP_*` and
-  `PULSE_ALERT_EMAIL_*` settings in your own shell are ignored, so the
-  tests never email a real inbox.
+  the resolve to a throwaway local SMTP server, and posts both to a local
+  stand-in for a Slack webhook. Notification settings in your own shell
+  (`PULSE_SMTP_*`, `PULSE_ALERT_EMAIL_*`, `PULSE_SLACK_WEBHOOK_URL`) are
+  ignored, so the tests never email a real inbox or post to a real channel.
 
 The database URL defaults to `postgresql://pulse:pulse@localhost:5432/pulse`
 (dev-only credentials); override it with `PULSE_DATABASE_URL`.
@@ -394,7 +395,7 @@ Operational notes:
   `uvicorn --workers 4` would evaluate every rule four times. The unique
   index on open alerts stops duplicate alert rows, but two evaluators can
   still both load the same pending alert and both fire it, so the
-  transition would be logged and emailed twice.
+  transition would be logged and notified twice.
 - Shutdown interrupts the wait between cycles, so stopping the API doesn't
   hang for up to a full interval.
 
@@ -497,11 +498,16 @@ Design decisions:
   minute fires within a second of being saved. That's the condition being
   true, not a shortcut.
 
-## Notifications (NOTIFY-01)
+## Notifications (NOTIFY-01, NOTIFY-02)
 
-When an alert **fires** or **resolves**, the API emails it (`pulse_ingest/notify.py`).
-Pending and cancelled alerts send nothing, since they never fired. Email is
-off unless configured with these environment variables:
+When an alert **fires** or **resolves**, the API emails it, posts it to
+Slack, or both (`pulse_ingest/notify.py`). Pending and cancelled alerts
+send nothing, since they never fired. Each channel is configured on its
+own; with neither, notifications are off.
+
+### Email
+
+Email is off unless configured with these environment variables:
 
 | Variable | Meaning |
 | --- | --- |
@@ -558,21 +564,66 @@ on why the alert closed:
   editing it so it no longer matches the series, closes its alerts the
   same way.
 
-Delivery:
+### Slack
+
+Set `PULSE_SLACK_WEBHOOK_URL` to a Slack
+[incoming webhook](https://api.slack.com/messaging/webhooks) URL and every
+fire and resolve is posted to that webhook's channel. To get one: at
+<https://api.slack.com/apps>, **Create New App** (from scratch), turn on
+**Incoming Webhooks**, click **Add New Webhook to Workspace**, pick the
+channel, and copy the `https://hooks.slack.com/services/...` URL. To try
+it, use a test channel in a workspace you own (a free one works) and create
+a rule that is always true, like `memory.total > 0`.
+
+Each message is the email's subject line, then the email's details in an
+attachment whose color bar shows what happened: red for firing, green for
+recovered, amber for no longer evaluated (with the same "NOT because the
+value recovered" explanation as the email). In Slack it reads like this:
+
+```
+[Pulse] FIRING: Root disk on web-1 (mount=/)
+┃ Root disk is FIRING on web-1.
+┃ Series                     Value
+┃ disk.usage{mount=/}        93.1 percent
+┃ Condition                  Breaching since
+┃ disk.usage > 90 for 5m     2026-10-19 21:15:02 UTC
+┃ Fired at
+┃ 2026-10-19 21:20:04 UTC
+┃ Alert #2, rule #4.
+```
+
+- **The URL is the secret.** Anyone who has it can post to the channel,
+  so treat it like a password. Pulse never logs it: the startup log shows
+  only its host, and the errors a failed post logs (Slack's reason, like
+  `no_service` for a deleted webhook) don't include it. An `http://` URL
+  logs a warning, since it would cross the network unencrypted, and
+  anything that isn't an `http(s)://` URL with a host stops the API at
+  startup.
+- **Names can't ping anyone.** Rule names, hostnames, and tags are
+  escaped (`&`, `<`, `>`), so a rule named `<!channel>` shows up as text
+  instead of notifying the whole channel, and nothing in them can turn
+  into a link.
+- **Long values are cut.** Slack rejects the whole message if one field is
+  over 2,000 characters, which a series with many long tags can reach, so
+  such a field is cut short with `…` instead.
+
+### Delivery
 
 - **Off the evaluation thread.** `AlertTracker` hands each change to a
   `Notifier` only after the change is committed, and the `Notifier` sends
-  from its own thread. A slow or unreachable mail server never delays rule
-  evaluation, and nothing is announced that didn't make it into the database.
+  from one thread per channel. A slow or unreachable mail server or webhook
+  never delays rule evaluation or the other channel (Slack messages don't
+  wait while email retries), and nothing is announced that didn't make it
+  into the database.
 - **Retried, then logged.** A failed send is retried after 5s and again
   after 30s, then logged at ERROR as given up. Each successful send is
   logged at INFO.
 - **Best effort, in memory.** Queued notifications are lost if the process
-  dies before sending them, and the queue drops new ones past 1,000 (logged
-  at ERROR). On a normal shutdown, the API sends what's queued first, for up
-  to 10s.
-- One email per transition, to every recipient. There are no per-rule
-  recipients and no batching.
+  dies before sending them, and each channel's queue drops new ones past
+  1,000 (logged at ERROR). On a normal shutdown, the API sends what's
+  queued first, for up to 10s.
+- One email (to every recipient) and one Slack message per transition.
+  There are no per-rule recipients or channels, and no batching.
 
 ## Migrations
 
@@ -622,3 +673,9 @@ half-applied. To add one, create the next numbered file, e.g.
 | ALERT-04 alert state machine | `migrations/004_alerts.sql`, `pulse_ingest/alerts.py` (`plan_transitions`, `AlertTracker`), `pulse_ingest/store.py` (`open_alerts`, `apply_alert_changes`), `tests/test_alerts.py`, `tests/test_alert_store.py`, `tests/test_migrate.py`, `tests/test_round_trip.py` |
 | ALERT-05 rule management (API side) | `pulse_ingest/app.py` (`/rules` endpoints), `pulse_ingest/store.py` (`list_rules` .. `delete_rule`, `UnknownHostError`), `tests/test_rule_endpoints.py`, `tests/test_rule_store.py`, `tests/fakes.py`; UI in `dashboard/` |
 | NOTIFY-01 email on fire and resolve | `pulse_ingest/notify.py`, `pulse_ingest/alerts.py` (`AlertTracker` hook), `pulse_ingest/app.py` (lifespan), `tests/test_notify.py`, `tests/test_alerts.py`, `tests/test_round_trip.py`, `tests/conftest.py` (`smtp_sink`) |
+
+## Task mapping (Week 8)
+
+| Task | File(s) |
+| --- | --- |
+| NOTIFY-02 Slack on fire and resolve | `pulse_ingest/notify.py` (`SlackConfig`, `build_slack_message`, `SlackChannel`, one `Notifier` thread per channel), `pulse_ingest/app.py` (`_notifier`), `tests/test_notify.py`, `tests/test_round_trip.py`, `tests/conftest.py` (`webhook_sink`) |

@@ -1,7 +1,9 @@
-"""Alert notifications: an email when an alert fires and when it resolves."""
+"""Alert notifications: an email and/or a Slack message when an alert fires
+and when it resolves."""
 
 from __future__ import annotations
 
+import json
 import logging
 import os
 import queue
@@ -10,12 +12,15 @@ import ssl
 import textwrap
 import threading
 import time
+import urllib.error
+import urllib.request
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from email.message import EmailMessage
 from email.utils import formatdate, make_msgid, parseaddr
-from typing import Literal, Protocol
+from typing import Any, Literal, Protocol
+from urllib.parse import urlsplit
 
 from pulse_ingest.alerts import series_label
 from pulse_ingest.store import Alert, AlertChange
@@ -38,6 +43,16 @@ EMAIL_ENV_VARS = (
     "PULSE_ALERT_EMAIL_FROM",
     "PULSE_ALERT_EMAIL_TO",
 )
+
+SLACK_ENV_VAR = "PULSE_SLACK_WEBHOOK_URL"
+SLACK_TIMEOUT_SECONDS = 10.0
+# Slack rejects the whole message if a block's text is longer than these.
+SLACK_SECTION_LIMIT = 3000
+SLACK_FIELD_LIMIT = 2000
+
+# Every variable a channel reads, so tests can keep a developer's real
+# settings out of the API they start.
+NOTIFY_ENV_VARS = (*EMAIL_ENV_VARS, SLACK_ENV_VAR)
 
 
 @dataclass(frozen=True)
@@ -104,18 +119,61 @@ def _port(text: str) -> int:
     return port
 
 
-def build_email(change: AlertChange, config: EmailConfig, now: float) -> EmailMessage:
-    """The message for a `fired` or `resolved` change (after it's stored, so
+@dataclass(frozen=True)
+class SlackConfig:
+    # The URL is the credential: anyone who has it can post to the channel.
+    webhook_url: str = field(repr=False)
+
+    @property
+    def host(self) -> str:
+        """The webhook's host, the only part of the URL that's safe to log."""
+        return urlsplit(self.webhook_url).hostname or ""
+
+    @classmethod
+    def from_env(cls, env: Mapping[str, str] | None = None) -> SlackConfig | None:
+        """The Slack settings, or None if Slack is off (the variable isn't set)."""
+        env = os.environ if env is None else env
+        url = env.get(SLACK_ENV_VAR, "").strip()
+        if not url:
+            return None
+        # The errors don't repeat the URL, since it's a secret.
+        parts = urlsplit(url)
+        if parts.scheme not in ("https", "http") or not parts.hostname:
+            raise ValueError(f"{SLACK_ENV_VAR} must be a webhook URL starting with https://")
+        if parts.scheme == "http":
+            logger.warning("%s is http://, so the webhook URL (its secret) is sent unencrypted", SLACK_ENV_VAR)
+        return cls(url)
+
+
+AlertOutcome = Literal["firing", "recovered", "not_evaluated"]
+
+
+@dataclass(frozen=True)
+class Notice:
+    """What a notification says about a `fired` or `resolved` change, for
+    each channel to lay out its own way."""
+
+    outcome: AlertOutcome
+    subject: str
+    summary: str
+    details: list[tuple[str, str]]
+    footer: str
+
+
+def describe(change: AlertChange) -> Notice:
+    """The notice for a `fired` or `resolved` change (after it's stored, so
     the alert has its id)."""
     a = change.after
+    outcome: AlertOutcome
     if change.kind == "fired":
-        status, summary = "FIRING", f"{a.rule_name} is FIRING on {a.hostname}."
+        outcome, status, summary = "firing", "FIRING", f"{a.rule_name} is FIRING on {a.hostname}."
     elif a.resolve_reason == "recovered":
-        status, summary = "RESOLVED", f"{a.rule_name} on {a.hostname} has RESOLVED: the value is back within the threshold."
+        outcome, status = "recovered", "RESOLVED"
+        summary = f"{a.rule_name} on {a.hostname} has RESOLVED: the value is back within the threshold."
     else:
         # Closing an alert because nothing evaluates it any more is not the
-        # same as the problem going away, and the email has to say so.
-        status = "RESOLVED (no longer evaluated)"
+        # same as the problem going away, and the notice has to say so.
+        outcome, status = "not_evaluated", "RESOLVED (no longer evaluated)"
         summary = (
             f"{a.rule_name} on {a.hostname} was closed because Pulse stopped evaluating it, "
             "NOT because the value recovered. Either the host stopped reporting this metric, "
@@ -123,9 +181,11 @@ def build_email(change: AlertChange, config: EmailConfig, now: float) -> EmailMe
         )
 
     scope = f" ({', '.join(f'{k}={v}' for k, v in sorted(a.tags.items()))})" if a.tags else ""
-    subject = f"[Pulse] {status}: {a.rule_name} on {a.hostname}{scope}"
+    # One line: rule names, hostnames, and tags may contain line breaks,
+    # which can't go in an email header.
+    subject = " ".join(f"[Pulse] {status}: {a.rule_name} on {a.hostname}{scope}".split())
 
-    value_label = "Value" if change.kind == "fired" or a.resolve_reason == "recovered" else "Last value seen"
+    value_label = "Value" if outcome != "not_evaluated" else "Last value seen"
     details = [
         ("Series", series_label(a)),
         (value_label, f"{_number(a.last_value)} {a.unit}"),
@@ -135,13 +195,17 @@ def build_email(change: AlertChange, config: EmailConfig, now: float) -> EmailMe
     ]
     if change.kind == "resolved":
         details += [("Resolved at", _time(a.resolved_at)), ("Firing for", _duration(a.resolved_at - a.fired_at))]
-    width = max(len(label) for label, _ in details) + 1
     rule = f"rule #{a.rule_id}" if a.rule_id is not None else "rule since deleted"
+    return Notice(outcome, subject, summary, details, f"Alert #{a.id}, {rule}.")
+
+
+def build_email(change: AlertChange, config: EmailConfig, now: float) -> EmailMessage:
+    """The message for a `fired` or `resolved` change."""
+    n = describe(change)
+    width = max(len(label) for label, _ in n.details) + 1
 
     message = EmailMessage()
-    # Rule names, hostnames, and tags may contain line breaks, which can't
-    # go in a header.
-    message["Subject"] = " ".join(subject.split())
+    message["Subject"] = n.subject
     message["From"] = config.sender
     message["To"] = ", ".join(config.recipients)
     message["Date"] = formatdate(now, usegmt=True)
@@ -149,16 +213,63 @@ def build_email(change: AlertChange, config: EmailConfig, now: float) -> EmailMe
     message.set_content(
         "\n".join(
             [
-                textwrap.fill(summary, 72),
+                textwrap.fill(n.summary, 72),
                 "",
-                *(f"  {label + ':':<{width}} {value}" for label, value in details),
+                *(f"  {label + ':':<{width}} {value}" for label, value in n.details),
                 "",
-                f"Alert #{a.id}, {rule}.",
+                n.footer,
             ]
         )
         + "\n"
     )
     return message
+
+
+# The dashboard's danger, online, and warning colors.
+SLACK_COLORS: dict[AlertOutcome, str] = {"firing": "#dc2626", "recovered": "#16a34a", "not_evaluated": "#b45309"}
+
+
+def build_slack_message(change: AlertChange) -> dict[str, Any]:
+    """The incoming-webhook payload for a `fired` or `resolved` change: the
+    subject as the message text, then the details in an attachment whose
+    color bar says firing (red), recovered (green), or no longer evaluated
+    (amber)."""
+    n = describe(change)
+    return {
+        "text": _slack_escape(n.subject),
+        "attachments": [
+            {
+                "color": SLACK_COLORS[n.outcome],
+                "blocks": [
+                    {"type": "section", "text": _mrkdwn(_slack_escape(n.summary), SLACK_SECTION_LIMIT)},
+                    {
+                        "type": "section",
+                        "fields": [
+                            _mrkdwn(f"*{label}*\n{_slack_escape(value)}", SLACK_FIELD_LIMIT) for label, value in n.details
+                        ],
+                    },
+                    {"type": "context", "elements": [_mrkdwn(n.footer, SLACK_SECTION_LIMIT)]},
+                ],
+            }
+        ],
+    }
+
+
+def _slack_escape(text: str) -> str:
+    """Escape Slack's control characters, so a rule named "<!channel>" can't
+    notify the whole channel and "<https://...|text>" can't become a link."""
+    return text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+
+
+def _mrkdwn(text: str, limit: int) -> dict[str, str]:
+    if len(text) > limit:
+        text = text[: limit - 1]
+        # Don't leave half an escape like "&am" at the end.
+        amp = text.rfind("&")
+        if amp != -1 and ";" not in text[amp:]:
+            text = text[:amp]
+        text += "…"
+    return {"type": "mrkdwn", "text": text}
 
 
 def _condition(a: Alert) -> str:
@@ -214,13 +325,38 @@ class EmailChannel:
             smtp.send_message(message)
 
 
+class SlackChannel:
+    name = "slack"
+
+    def __init__(self, config: SlackConfig) -> None:
+        self.config = config
+
+    def send(self, change: AlertChange, now: float) -> None:
+        request = urllib.request.Request(
+            self.config.webhook_url,
+            data=json.dumps(build_slack_message(change)).encode(),
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        # None of the errors raised here include the URL, so the Notifier
+        # can log them without leaking it.
+        try:
+            with urllib.request.urlopen(request, timeout=SLACK_TIMEOUT_SECONDS):
+                pass
+        except urllib.error.HTTPError as exc:
+            # Slack says why in the body, e.g. "invalid_payload", or
+            # "no_service" once the webhook has been removed.
+            reason = exc.read(200).decode("utf-8", "replace").strip() or exc.reason
+            raise RuntimeError(f"Slack answered {exc.code}: {reason}") from None
+
+
 _STOP = object()
 
 
 class Notifier:
-    """Sends notifications for fired and resolved alerts on a background
-    thread, so a slow or unreachable mail server never holds up rule
-    evaluation.
+    """Sends notifications for fired and resolved alerts, each channel from
+    its own background thread, so a slow or unreachable mail server or
+    webhook never holds up rule evaluation or the other channels.
 
     Delivery is best effort: a failed send is retried after each of
     `retry_delays`, then logged as lost. Notifications are only held in
@@ -234,42 +370,50 @@ class Notifier:
         max_queued: int = 1000,
         clock: Callable[[], float] = time.time,
     ) -> None:
-        self._channels = list(channels)
+        self._lanes = [(channel, queue.Queue()) for channel in channels]
         self._retry_delays = tuple(retry_delays)
         self._max_queued = max_queued
         self._clock = clock
-        self._queue: queue.Queue = queue.Queue()
         self._stopping = threading.Event()
-        self._thread: threading.Thread | None = None
+        self._threads: list[threading.Thread] = []
 
     def __call__(self, change: AlertChange) -> None:
         """Queue a stored alert change; anything but fired/resolved is ignored."""
         if change.kind not in NOTIFY_KINDS:
             return
-        if self._queue.qsize() >= self._max_queued:
-            logger.error("Notification queue full; dropped %s notification for alert %d", change.kind, change.after.id)
-            return
-        self._queue.put(change)
+        for channel, pending in self._lanes:
+            if pending.qsize() >= self._max_queued:
+                logger.error(
+                    "%s notification queue full; dropped %s notification for alert %d",
+                    channel.name, change.kind, change.after.id,
+                )
+            else:
+                pending.put(change)
 
     def start(self) -> None:
         self._stopping.clear()
-        self._thread = threading.Thread(target=self._run, name="pulse-notifier", daemon=True)
-        self._thread.start()
+        self._threads = [
+            threading.Thread(target=self._run, args=lane, name=f"pulse-notify-{lane[0].name}", daemon=True)
+            for lane in self._lanes
+        ]
+        for thread in self._threads:
+            thread.start()
 
     def stop(self, timeout: float = 10.0) -> None:
         """Finish what's queued (retrying without waiting), for up to `timeout`."""
         self._stopping.set()
-        self._queue.put(_STOP)
-        if self._thread is not None:
-            self._thread.join(timeout)
-            if self._thread.is_alive():
-                logger.warning("Notifier didn't finish within %ss; queued notifications may be lost", timeout)
-            self._thread = None
+        for _, pending in self._lanes:
+            pending.put(_STOP)
+        deadline = time.monotonic() + timeout
+        for thread in self._threads:
+            thread.join(max(0.0, deadline - time.monotonic()))
+        if any(thread.is_alive() for thread in self._threads):
+            logger.warning("Notifier didn't finish within %ss; queued notifications may be lost", timeout)
+        self._threads = []
 
-    def _run(self) -> None:
-        while (change := self._queue.get()) is not _STOP:
-            for channel in self._channels:
-                self._deliver(channel, change)
+    def _run(self, channel: Channel, pending: queue.Queue) -> None:
+        while (change := pending.get()) is not _STOP:
+            self._deliver(channel, change)
 
     def _deliver(self, channel: Channel, change: AlertChange) -> None:
         a = change.after
