@@ -29,6 +29,8 @@ function rule(overrides: Partial<AlertRule> = {}): AlertRule {
     host: null,
     tag_filter: { core: null },
     enabled: true,
+    kind: "threshold",
+    baseline_seconds: null,
     created_at: 1,
     updated_at: 1,
     ...overrides,
@@ -146,8 +148,66 @@ describe("RulesPage", () => {
       host: "web-1",
       tag_filter: { core: null },
       enabled: true,
+      kind: "threshold",
+      baseline_seconds: null,
     });
     expect(screen.queryByRole("form")).not.toBeInTheDocument();
+  });
+
+  it("creates an anomaly rule: sigma below the baseline is sent as a negative threshold", async () => {
+    fetchRules.mockResolvedValueOnce([]).mockResolvedValueOnce([]);
+    createRule.mockResolvedValue(rule({ id: 6 }));
+    renderRules();
+    fireEvent.click(await screen.findByRole("button", { name: "New rule" }));
+
+    type("Type", "anomaly");
+    type("Name", "CPU drop");
+    type("Metric", "cpu.usage");
+    expect(field("Sigma (σ)").value).toBe("3");
+    expect(screen.getByText("Breaches 3σ or more above the baseline")).toBeInTheDocument();
+    type("Operator", "<");
+    type("Sigma (σ)", "2.5");
+    expect(screen.getByText("Breaches 2.5σ or more below the baseline")).toBeInTheDocument();
+    expect(screen.getByText("Normal = the 1h before")).toBeInTheDocument();
+    type("Baseline (seconds)", "900");
+    type("For (seconds)", "60");
+    fireEvent.click(screen.getByRole("button", { name: "Create rule" }));
+
+    await waitFor(() => expect(createRule).toHaveBeenCalledTimes(1));
+    expect(createRule.mock.calls[0][0]).toMatchObject({
+      kind: "anomaly",
+      operator: "<",
+      threshold: -2.5,
+      baseline_seconds: 900,
+      duration_seconds: 60,
+    });
+  });
+
+  it("lists an anomaly rule's condition and keeps it an anomaly rule when edited", async () => {
+    const existing = rule({ id: 4, name: "Odd CPU", kind: "anomaly", operator: "<", threshold: -3, baseline_seconds: 600, duration_seconds: 60 });
+    fetchRules.mockResolvedValue([existing]);
+    updateRule.mockResolvedValue(existing);
+    renderRules();
+
+    const item = await screen.findByRole("listitem", { name: "Odd CPU" });
+    expect(within(item).getByText("cpu.usage < baseline - 3σ (10m window) for 1m")).toBeInTheDocument();
+    fireEvent.click(within(item).getByRole("button", { name: "Edit" }));
+
+    expect([field("Type").value, field("Sigma (σ)").value, field("Baseline (seconds)").value]).toEqual([
+      "anomaly",
+      "3",
+      "600",
+    ]);
+    type("For (seconds)", "120");
+    fireEvent.click(screen.getByRole("button", { name: "Save changes" }));
+
+    await waitFor(() => expect(updateRule).toHaveBeenCalledTimes(1));
+    expect(updateRule.mock.calls[0][1]).toMatchObject({
+      kind: "anomaly",
+      threshold: -3,
+      baseline_seconds: 600,
+      duration_seconds: 120,
+    });
   });
 
   it("shows the duration in words as you type it", async () => {

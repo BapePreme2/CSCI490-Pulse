@@ -12,17 +12,25 @@ from __future__ import annotations
 
 import math
 from collections import deque
-from collections.abc import Sequence
+from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
 
+from pulse_ingest.schemas import DEFAULT_BASELINE_SECONDS, MAX_BASELINE_SECONDS, MIN_BASELINE_SECONDS
 from pulse_ingest.store import HistoryPoint
 
-DEFAULT_WINDOW_SECONDS = 3600
-MIN_WINDOW_SECONDS = 60
-MAX_WINDOW_SECONDS = 24 * 3600
+# One set of limits for the baseline endpoint's window and anomaly rules'
+# baseline_seconds.
+DEFAULT_WINDOW_SECONDS = DEFAULT_BASELINE_SECONDS
+MIN_WINDOW_SECONDS = MIN_BASELINE_SECONDS
+MAX_WINDOW_SECONDS = MAX_BASELINE_SECONDS
 
 # Five minutes of samples at the agent's default 10s interval.
 MIN_BASELINE_SAMPLES = 30
+
+# A series that barely moves (disk.usage, memory.total) has a standard
+# deviation at or near zero, so any wobble at all would be "many sigma" away.
+# Deviations are measured in at least this fraction of the baseline mean.
+MIN_RELATIVE_SPREAD = 0.01
 
 
 @dataclass(frozen=True)
@@ -73,6 +81,28 @@ class _Window:
         return math.sqrt(max(self.m2, 0.0) / (self.count - 1))
 
 
+@dataclass(frozen=True)
+class Baseline:
+    """The mean and sample stddev (n - 1) of a set of samples."""
+
+    samples: int
+    mean: float
+    stddev: float
+
+
+def baseline(values: Iterable[float], min_samples: int = MIN_BASELINE_SAMPLES) -> Baseline | None:
+    """The baseline of these values, or None if there are fewer than
+    `min_samples` of them."""
+    if min_samples < 2:
+        raise ValueError("min_samples must be at least 2 (a standard deviation needs two samples)")
+    window = _Window()
+    for value in values:
+        window.add(value)
+    if window.count < min_samples:
+        return None
+    return Baseline(window.count, window.mean, window.stddev())
+
+
 def rolling_baseline(
     points: Sequence[HistoryPoint],
     window_seconds: float = DEFAULT_WINDOW_SECONDS,
@@ -113,3 +143,25 @@ def rolling_baseline(
         window.add(point.value)
         in_window.append(point)
     return result
+
+
+def spread(mean: float, stddev: float) -> float:
+    """The standard deviation a deviation is measured in: the baseline's own,
+    but at least MIN_RELATIVE_SPREAD of its mean. 0 only for a baseline that
+    was constantly 0."""
+    return max(stddev, MIN_RELATIVE_SPREAD * abs(mean))
+
+
+def deviation(value: float, mean: float, stddev: float) -> float:
+    """How many standard deviations (see `spread`) `value` is from `mean`:
+    positive above it, negative below.
+
+    Against a baseline that was constantly 0 (network.errors on a healthy
+    host), any other value is infinitely far off, so it's +/-inf rather than
+    a division by zero. Not JSON-safe; never put it in a response as is.
+    """
+    diff = value - mean
+    s = spread(mean, stddev)
+    if s == 0:
+        return 0.0 if diff == 0 else math.copysign(math.inf, diff)
+    return diff / s

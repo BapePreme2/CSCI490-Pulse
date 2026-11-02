@@ -2,7 +2,7 @@ import { useState } from "react";
 import type { FormEvent } from "react";
 import type { AlertRuleInput } from "../api/types";
 import { formatDuration } from "../rules/format";
-import { OPERATORS, inputFromForm } from "../rules/form";
+import { OPERATORS, inputFromForm, isAbove } from "../rules/form";
 import type { RuleFormState, TagFilterRow } from "../rules/form";
 
 /** Metric names the Pulse agent reports, offered as suggestions only: any
@@ -52,6 +52,15 @@ export function RuleForm({ title, initial, hosts, submitLabel, onSubmit, onCance
   const set = <K extends keyof RuleFormState>(key: K, value: RuleFormState[K]) =>
     setForm((current) => ({ ...current, [key]: value }));
 
+  // The threshold means something else for each kind (a value vs. a number
+  // of σ), so switching kinds starts it over rather than carry "80" into "80σ".
+  const setKind = (kind: RuleFormState["kind"]) =>
+    setForm((current) =>
+      current.kind === kind ? current : { ...current, kind, threshold: kind === "anomaly" ? "3" : "" },
+    );
+
+  const anomaly = form.kind === "anomaly";
+
   const setRow = (index: number, change: Partial<TagFilterRow>) =>
     set(
       "tagFilter",
@@ -89,6 +98,14 @@ export function RuleForm({ title, initial, hosts, submitLabel, onSubmit, onCance
 
       <div className="rule-form-grid">
         <label className="rule-form-field rule-form-field--wide">
+          Type
+          <select value={form.kind} onChange={(e) => setKind(e.target.value as RuleFormState["kind"])}>
+            <option value="threshold">Threshold: the value crosses a fixed number</option>
+            <option value="anomaly">Anomaly: the value is unusual for this series</option>
+          </select>
+        </label>
+
+        <label className="rule-form-field rule-form-field--wide">
           Name
           <input value={form.name} onChange={(e) => set("name", e.target.value)} placeholder="e.g. High CPU" />
         </label>
@@ -119,15 +136,48 @@ export function RuleForm({ title, initial, hosts, submitLabel, onSubmit, onCance
           </select>
         </label>
 
-        <label className="rule-form-field">
-          Threshold
-          <input
-            inputMode="decimal"
-            value={form.threshold}
-            onChange={(e) => set("threshold", e.target.value)}
-            placeholder="e.g. 80"
-          />
-        </label>
+        {anomaly ? (
+          <div className="rule-form-field">
+            <label htmlFor="rule-form-sigma">Sigma (σ)</label>
+            <input
+              id="rule-form-sigma"
+              inputMode="decimal"
+              value={form.threshold}
+              onChange={(e) => set("threshold", e.target.value)}
+              placeholder="e.g. 3"
+              aria-describedby="rule-form-sigma-hint"
+            />
+            <span id="rule-form-sigma-hint" className="rule-form-hint">
+              {sigmaHint(form)}
+            </span>
+          </div>
+        ) : (
+          <label className="rule-form-field">
+            Threshold
+            <input
+              inputMode="decimal"
+              value={form.threshold}
+              onChange={(e) => set("threshold", e.target.value)}
+              placeholder="e.g. 80"
+            />
+          </label>
+        )}
+
+        {anomaly && (
+          <div className="rule-form-field">
+            <label htmlFor="rule-form-baseline">Baseline (seconds)</label>
+            <input
+              id="rule-form-baseline"
+              inputMode="numeric"
+              value={form.baselineSeconds}
+              onChange={(e) => set("baselineSeconds", e.target.value)}
+              aria-describedby="rule-form-baseline-hint"
+            />
+            <span id="rule-form-baseline-hint" className="rule-form-hint">
+              {baselineHint(form.baselineSeconds)}
+            </span>
+          </div>
+        )}
 
         {/* Not a wrapping <label>: the hint would become part of the field's name. */}
         <div className="rule-form-field">
@@ -226,6 +276,18 @@ export function RuleForm({ title, initial, hosts, submitLabel, onSubmit, onCance
       </div>
     </form>
   );
+}
+
+function sigmaHint(form: RuleFormState): string {
+  const sigma = Number(form.threshold);
+  if (form.threshold.trim() === "" || !Number.isFinite(sigma) || sigma <= 0) return "";
+  return `Breaches ${sigma}σ or more ${isAbove(form.operator) ? "above" : "below"} the baseline`;
+}
+
+function baselineHint(text: string): string {
+  const seconds = Number(text);
+  if (text.trim() === "" || !Number.isInteger(seconds) || seconds <= 0) return "";
+  return `Normal = the ${formatDuration(seconds)} before`;
 }
 
 function durationHint(text: string): string {

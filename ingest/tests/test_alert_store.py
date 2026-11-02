@@ -345,3 +345,20 @@ def test_history_keeps_alerts_whose_rule_was_deleted(store, db_url):
     query(db_url, "DELETE FROM alert_rules WHERE id = %s RETURNING id", (rule_id,))
 
     assert store.list_alerts(None, None, 100).alerts == [replace(alert, rule_id=None)]
+
+
+def test_anomaly_alert_fields_round_trip(store, db_url):
+    report(store, 91.5, TS, core="0")
+    rule_id = add_rule(db_url)
+    alert = new_alert(
+        db_url, rule_id, kind="anomaly", baseline_seconds=600, threshold=3.0,
+        last_baseline_mean=40.25, last_baseline_stddev=6.5,
+    )
+
+    (applied,) = store.apply_alert_changes([AlertChange("pending", None, alert)])
+    (opened,) = store.open_alerts()
+    fired = replace(opened, state="firing", fired_at=TS + 10, last_baseline_mean=41.0, last_baseline_stddev=7.0)
+    store.apply_alert_changes([AlertChange("fired", opened, fired)])
+
+    assert opened == applied.after
+    assert store.list_alerts(None, None, 10).alerts == [fired]

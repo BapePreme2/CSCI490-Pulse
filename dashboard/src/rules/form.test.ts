@@ -17,6 +17,8 @@ const RULE: AlertRule = {
   host: "web-1",
   tag_filter: { mount: "/", core: null },
   enabled: false,
+  kind: "threshold",
+  baseline_seconds: null,
   created_at: 1,
   updated_at: 2,
 };
@@ -44,6 +46,8 @@ describe("formFromRule / inputFromForm", () => {
         host: "web-1",
         tag_filter: { mount: "/", core: null },
         enabled: false,
+        kind: "threshold",
+        baseline_seconds: null,
       },
     });
   });
@@ -105,5 +109,47 @@ describe("formFromRule / inputFromForm", () => {
     const result = inputFromForm(form({ durationSeconds: "0", threshold: "-1.5" }));
 
     expect(result.ok && [result.input.duration_seconds, result.input.threshold]).toEqual([0, -1.5]);
+  });
+});
+
+describe("anomaly rules", () => {
+  const ANOMALY: AlertRule = { ...RULE, kind: "anomaly", operator: "<", threshold: -2.5, baseline_seconds: 900 };
+
+  it("shows the sigma as a positive number and round-trips it with its sign", () => {
+    const state = formFromRule(ANOMALY);
+    const result = inputFromForm(state);
+
+    expect([state.kind, state.threshold, state.baselineSeconds]).toEqual(["anomaly", "2.5", "900"]);
+    expect(result.ok && [result.input.kind, result.input.threshold, result.input.baseline_seconds]).toEqual([
+      "anomaly",
+      -2.5,
+      900,
+    ]);
+  });
+
+  it("sends a positive threshold for above-the-baseline operators", () => {
+    const result = inputFromForm(form({ kind: "anomaly", operator: ">=", threshold: "3" }));
+
+    expect(result.ok && [result.input.threshold, result.input.baseline_seconds]).toEqual([3, 3600]);
+  });
+
+  it("sends no baseline for a threshold rule even if one was typed", () => {
+    const result = inputFromForm(form({ baselineSeconds: "900" }));
+
+    expect(result.ok && [result.input.kind, result.input.baseline_seconds]).toEqual(["threshold", null]);
+  });
+
+  it.each([
+    [{ threshold: "0" }, "Sigma must be more than 0 (choose above or below with the operator)."],
+    [{ threshold: "-3" }, "Sigma must be more than 0 (choose above or below with the operator)."],
+    [{ threshold: "x" }, "Sigma must be a number."],
+    [{ baselineSeconds: "59" }, "Baseline window must be a whole number of seconds, 60-86400."],
+    [{ baselineSeconds: "86401" }, "Baseline window must be a whole number of seconds, 60-86400."],
+    [{ baselineSeconds: "90.5" }, "Baseline window must be a whole number of seconds, 60-86400."],
+  ])("rejects %o", (overrides, message) => {
+    expect(inputFromForm(form({ kind: "anomaly", threshold: "3", ...overrides }))).toEqual({
+      ok: false,
+      errors: [message],
+    });
   });
 });

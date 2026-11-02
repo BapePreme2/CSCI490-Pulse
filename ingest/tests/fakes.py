@@ -115,4 +115,6 @@ class FakeStore:
             enabled=rule.enabled,
             created_at=created_at,
             updated_at=created_at + 1,
+            kind=rule.kind,
+            baseline_seconds=rule.baseline_seconds,
         )

@@ -10,9 +10,18 @@ export function formatDuration(seconds: number): string {
   return parts.join(" ");
 }
 
-/** "cpu.usage > 80 for 5m", or without "for ..." when it fires on the first sample. */
-export function describeCondition(rule: Pick<AlertRule, "metric_name" | "operator" | "threshold" | "duration_seconds">): string {
-  const condition = `${rule.metric_name} ${rule.operator} ${rule.threshold}`;
+/** "cpu.usage > 80 for 5m", or without "for ..." when it fires on the first
+ * sample. An anomaly rule reads "cpu.usage > baseline + 3σ (1h window) for 1m",
+ * the same as the API's notifications. */
+export function describeCondition(
+  rule: Pick<AlertRule, "metric_name" | "operator" | "threshold" | "duration_seconds" | "kind" | "baseline_seconds">,
+): string {
+  let condition = `${rule.metric_name} ${rule.operator} ${rule.threshold}`;
+  if (rule.kind === "anomaly") {
+    const sign = rule.threshold > 0 ? "+" : "-";
+    const window = rule.baseline_seconds === null ? "" : ` (${formatDuration(rule.baseline_seconds)} window)`;
+    condition = `${rule.metric_name} ${rule.operator} baseline ${sign} ${Math.abs(rule.threshold)}σ${window}`;
+  }
   return rule.duration_seconds > 0 ? `${condition} for ${formatDuration(rule.duration_seconds)}` : condition;
 }
 

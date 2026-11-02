@@ -11,6 +11,7 @@ from dataclasses import dataclass, replace
 import psycopg
 from psycopg_pool import PoolTimeout
 
+from pulse_ingest.anomaly import baseline, deviation, spread
 from pulse_ingest.store import STALE_AFTER_SECONDS, Alert, AlertChange, AlertStore, RuleSeries
 
 logger = logging.getLogger(__name__)
@@ -50,12 +51,27 @@ class Evaluation:
     stayed past it, without a break, for the rule's full duration_seconds.
     `breaching_since`: when the current unbroken run started, as far back as
     the fetched window reaches (so "at least since" once it's sustained).
+
+    For an anomaly rule, "past the threshold" is about each sample's
+    deviation from the baseline, and `baseline_mean`/`baseline_stddev` are
+    that baseline (the stddev as the spread the deviation was measured in,
+    see anomaly.spread).
     """
 
     series: RuleSeries
     breaching: bool
     sustained: bool = False
     breaching_since: float | None = None
+    baseline_mean: float | None = None
+    baseline_stddev: float | None = None
+    # The gap that breaks a run, kept so the evaluation can be redone
+    # against an open alert's own baseline (see `against`).
+    max_gap: float = STALE_AFTER_SECONDS
+
+    def against(self, mean: float, stddev: float) -> Evaluation:
+        """This series judged against the given baseline instead of the one
+        it was evaluated with."""
+        return _evaluate(self.series, self.max_gap, (mean, stddev))
 
     @property
     def series_key(self) -> SeriesKey:
@@ -65,22 +81,54 @@ class Evaluation:
 
 
 def evaluate(series: Iterable[RuleSeries], max_gap: float = STALE_AFTER_SECONDS) -> list[Evaluation]:
-    return [_evaluate(s, max_gap) for s in series]
+    """Each series' evaluation. An anomaly rule's series whose latest sample
+    has no baseline yet (too few samples in its window) is left out: there's
+    nothing to judge it against, so it is neither breaching nor OK."""
+    evaluations = []
+    for s in series:
+        e = _evaluate(s, max_gap)
+        if e is not None:
+            evaluations.append(e)
+    return evaluations
 
 
-def _evaluate(s: RuleSeries, max_gap: float) -> Evaluation:
+def _evaluate(s: RuleSeries, max_gap: float, fixed: tuple[float, float] | None = None) -> Evaluation | None:
     breaches = OPERATORS[s.operator]
     latest = s.points[-1]
-    if not breaches(latest.value, s.threshold):
-        return Evaluation(s, breaching=False)
+    extra: dict[str, float] = {"max_gap": max_gap}
+    if s.kind == "anomaly":
+        if fixed is not None:
+            mean, stddev = fixed
+        else:
+            # Every sample is judged against one baseline: the
+            # baseline_seconds before the last duration_seconds, so the
+            # samples that have to be unusual for the rule to fire don't count
+            # toward what's "usual". Judging each against its own rolling
+            # baseline instead lets a lasting jump raise the baseline under
+            # it, until after roughly baseline_seconds / threshold^2 it no
+            # longer looks unusual, which can be sooner than the duration.
+            # With duration 0 this is the baseline GET .../baseline gives the
+            # latest sample.
+            cutoff = latest.timestamp - s.duration_seconds
+            b = baseline(p.value for p in s.points if cutoff - s.baseline_seconds <= p.timestamp < cutoff)
+            if b is None:
+                return None
+            mean, stddev = b.mean, spread(b.mean, b.stddev)
+        flags = [breaches(deviation(p.value, mean, stddev), s.threshold) for p in s.points]
+        extra |= {"baseline_mean": mean, "baseline_stddev": stddev}
+    else:
+        flags = [breaches(p.value, s.threshold) for p in s.points]
+
+    if not flags[-1]:
+        return Evaluation(s, breaching=False, **extra)
 
     # Walk back from the latest sample through the unbroken run of breaching
     # samples. A sample back within the threshold ends the run, and so does a
     # silence longer than max_gap: with no data in between there's no telling
     # whether the breach held through it.
     run_start = latest.timestamp
-    for point in reversed(s.points[:-1]):
-        if run_start - point.timestamp > max_gap or not breaches(point.value, s.threshold):
+    for point, breaching in zip(reversed(s.points[:-1]), reversed(flags[:-1])):
+        if run_start - point.timestamp > max_gap or not breaching:
             break
         run_start = point.timestamp
 
@@ -89,6 +137,7 @@ def _evaluate(s: RuleSeries, max_gap: float) -> Evaluation:
         breaching=True,
         sustained=latest.timestamp - run_start >= s.duration_seconds,
         breaching_since=run_start,
+        **extra,
     )
 
 
@@ -189,6 +238,12 @@ def plan_transitions(
       tracker holds enabled rules' alerts this way while catching up, when
       missing data may be data that hasn't arrived yet.
 
+    An open anomaly alert keeps the baseline it opened with: its series is
+    judged against what was normal before the alert began, not against a
+    baseline that has since soaked up the anomaly itself. Otherwise a jump
+    that lasts would "resolve" while the value is still up, as soon as
+    enough of it had entered the moving baseline.
+
     Every open alert that stays open is refreshed ("updated") with the
     latest value and the rule's current condition.
     """
@@ -203,6 +258,13 @@ def plan_transitions(
 
     for e in evaluations:
         alert = remaining.pop(e.series_key, None)
+        if (
+            alert is not None
+            and alert.kind == "anomaly"
+            and e.series.kind == "anomaly"
+            and alert.last_baseline_mean is not None
+        ):
+            e = e.against(alert.last_baseline_mean, alert.last_baseline_stddev)
         change = _step(alert, e, now)
         if change is not None:
             changes.append(change)
@@ -262,6 +324,10 @@ def _new_alert(e: Evaluation, now: float, state: str) -> Alert:
         last_value=s.points[-1].value,
         last_evaluated_at=now,
         fired_at=now if state == "firing" else None,
+        kind=s.kind,
+        baseline_seconds=s.baseline_seconds,
+        last_baseline_mean=e.baseline_mean,
+        last_baseline_stddev=e.baseline_stddev,
     )
 
 
@@ -274,7 +340,11 @@ def _refresh(alert: Alert, e: Evaluation, now: float, **changes) -> Alert:
         operator=s.operator,
         threshold=s.threshold,
         duration_seconds=s.duration_seconds,
+        kind=s.kind,
+        baseline_seconds=s.baseline_seconds,
         last_value=s.points[-1].value,
+        last_baseline_mean=e.baseline_mean,
+        last_baseline_stddev=e.baseline_stddev,
         last_evaluated_at=now,
         **changes,
     )
@@ -338,7 +408,10 @@ def series_label(a: Alert) -> str:
 
 def _describe(a: Alert) -> str:
     rule = f"#{a.rule_id}" if a.rule_id is not None else "(deleted rule)"
-    return (
-        f"{rule} {a.rule_name!r} on {a.hostname}: "
-        f"{series_label(a)} = {a.last_value:g} {a.unit} ({a.operator} {a.threshold:g})"
-    )
+    if a.kind == "anomaly":
+        condition = f"{a.operator} baseline {a.threshold:+g}σ"
+        if a.last_baseline_mean is not None:
+            condition += f", baseline {a.last_baseline_mean:g} ± {a.last_baseline_stddev:g}"
+    else:
+        condition = f"{a.operator} {a.threshold:g}"
+    return f"{rule} {a.rule_name!r} on {a.hostname}: {series_label(a)} = {a.last_value:g} {a.unit} ({condition})"

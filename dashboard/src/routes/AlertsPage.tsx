@@ -2,7 +2,14 @@ import { useEffect, useState } from "react";
 import { Link, useSearchParams } from "react-router-dom";
 import { ApiError, fetchAlerts, fetchHosts } from "../api/client";
 import type { Alert, AlertHistoryResponse, AlertState } from "../api/types";
-import { OUTCOME_LABELS, alertOutcome, describeSeries, firingSeconds, formatAlertValue } from "../alerts/format";
+import {
+  OUTCOME_LABELS,
+  alertOutcome,
+  describeSeries,
+  firingSeconds,
+  formatAlertValue,
+  formatBaseline,
+} from "../alerts/format";
 import { formatRelativeTime } from "../metrics/format";
 import { describeCondition, formatDuration } from "../rules/format";
 
@@ -181,6 +188,7 @@ const VALUE_LABELS = { firing: "Latest value", recovered: "Value when resolved",
 function AlertCard({ alert, now }: { alert: Alert; now: number }) {
   const outcome = alertOutcome(alert);
   const firing = outcome === "firing";
+  const baseline = formatBaseline(alert);
 
   return (
     <li className={`alert-card alert-card--${outcome}`} aria-label={`${alert.rule_name} on ${alert.host}`}>
@@ -206,6 +214,12 @@ function AlertCard({ alert, now }: { alert: Alert; now: number }) {
           <dt>{VALUE_LABELS[outcome]}</dt>
           <dd>{formatAlertValue(alert.last_value, alert.unit)}</dd>
         </div>
+        {baseline !== null && (
+          <div>
+            <dt>Baseline</dt>
+            <dd>{baseline}</dd>
+          </div>
+        )}
         <div>
           <dt>Fired</dt>
           <dd>

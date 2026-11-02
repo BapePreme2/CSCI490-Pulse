@@ -195,3 +195,27 @@ def test_each_rule_gets_its_own_copy_of_a_shared_series(store, db_url):
     second = add_rule(db_url, threshold=90.0)
 
     assert series(store.rule_series(SINCE, PADDING)) == [(first, "web-1", ()), (second, "web-1", ())]
+
+
+def test_anomaly_rule_window_reaches_its_baseline_further_back(store, db_url):
+    write(store, "web-1", *(metric(ts=TS + offset) for offset in (0, -10, -60, -690, -691)))
+    with psycopg.connect(db_url) as conn:
+        conn.execute(
+            "INSERT INTO alert_rules (name, metric_name, operator, threshold, duration_seconds, kind, baseline_seconds) "
+            "VALUES ('odd', 'cpu.usage', '>', 3, 60, 'anomaly', 600)"
+        )
+
+    (s,) = store.rule_series(SINCE, PADDING)
+
+    # duration 60 + baseline 600 + padding 30
+    assert timestamps(s) == [-690, -60, -10, 0]
+    assert (s.kind, s.baseline_seconds) == ("anomaly", 600)
+
+
+def test_threshold_rule_series_say_so(store, db_url):
+    write(store, "web-1", metric())
+    add_rule(db_url)
+
+    (s,) = store.rule_series(SINCE, PADDING)
+
+    assert (s.kind, s.baseline_seconds) == ("threshold", None)

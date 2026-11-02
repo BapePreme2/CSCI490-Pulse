@@ -23,6 +23,8 @@ const FIELD_LABELS: Record<string, string> = {
   host: "Hosts",
   tag_filter: "Tag filter",
   enabled: "Enabled",
+  kind: "Type",
+  baseline_seconds: "Baseline window",
 };
 
 function messageFor(error: unknown): string {

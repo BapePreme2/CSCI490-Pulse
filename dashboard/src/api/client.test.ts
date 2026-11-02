@@ -199,6 +199,8 @@ const RULE_INPUT: AlertRuleInput = {
   host: null,
   tag_filter: { core: null },
   enabled: true,
+  kind: "threshold",
+  baseline_seconds: null,
 };
 
 describe("alert rule requests", () => {

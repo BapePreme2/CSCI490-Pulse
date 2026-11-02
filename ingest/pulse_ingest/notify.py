@@ -169,7 +169,12 @@ def describe(change: AlertChange) -> Notice:
         outcome, status, summary = "firing", "FIRING", f"{a.rule_name} is FIRING on {a.hostname}."
     elif a.resolve_reason == "recovered":
         outcome, status = "recovered", "RESOLVED"
-        summary = f"{a.rule_name} on {a.hostname} has RESOLVED: the value is back within the threshold."
+        back = (
+            f"the value is back within {_number(abs(a.threshold))}σ of its baseline"
+            if a.kind == "anomaly"
+            else "the value is back within the threshold"
+        )
+        summary = f"{a.rule_name} on {a.hostname} has RESOLVED: {back}."
     else:
         # Closing an alert because nothing evaluates it any more is not the
         # same as the problem going away, and the notice has to say so.
@@ -190,6 +195,7 @@ def describe(change: AlertChange) -> Notice:
         ("Series", series_label(a)),
         (value_label, f"{_number(a.last_value)} {a.unit}"),
         ("Condition", _condition(a)),
+        *_baseline_details(a),
         ("Breaching since", _time(a.pending_since)),
         ("Fired at", _time(a.fired_at)),
     ]
@@ -273,8 +279,34 @@ def _mrkdwn(text: str, limit: int) -> dict[str, str]:
 
 
 def _condition(a: Alert) -> str:
-    condition = f"{a.metric_name} {a.operator} {_number(a.threshold)}"
+    """Like the dashboard's describeCondition: "disk.usage > 90 for 5m", or
+    "cpu.usage > baseline + 3σ (1h window) for 1m" for an anomaly rule."""
+    if a.kind == "anomaly":
+        sign = "+" if a.threshold > 0 else "-"
+        condition = (
+            f"{a.metric_name} {a.operator} baseline {sign} {_number(abs(a.threshold))}σ "
+            f"({_duration(a.baseline_seconds)} window)"
+        )
+    else:
+        condition = f"{a.metric_name} {a.operator} {_number(a.threshold)}"
     return f"{condition} for {_duration(a.duration_seconds)}" if a.duration_seconds > 0 else condition
+
+
+def _baseline_details(a: Alert) -> list[tuple[str, str]]:
+    """An anomaly alert's baseline as of its last evaluation, and how far the
+    value was from it: what "unusual" was measured against."""
+    if a.kind != "anomaly" or a.last_baseline_mean is None:
+        return []
+    mean, spread = a.last_baseline_mean, a.last_baseline_stddev
+    baseline = f"{_number(mean)} ± {_number(spread)} {a.unit}"
+    if spread > 0:
+        off = f"{(a.last_value - mean) / spread:+.1f}σ"
+    elif a.last_value == mean:
+        off = "0σ"
+    else:
+        # Only a baseline that was constantly 0 has no spread at all.
+        off = "any change from a constant baseline"
+    return [("Baseline", baseline), ("Deviation", off)]
 
 
 def _number(value: float) -> str:

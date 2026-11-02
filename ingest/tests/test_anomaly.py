@@ -1,10 +1,11 @@
+import math
 import random
 import statistics
 
 import pytest
 from fastapi.testclient import TestClient
 
-from pulse_ingest.anomaly import MIN_BASELINE_SAMPLES, rolling_baseline
+from pulse_ingest.anomaly import MIN_BASELINE_SAMPLES, baseline, deviation, rolling_baseline, spread
 from pulse_ingest.app import create_app
 from pulse_ingest.migrate import apply_migrations
 from pulse_ingest.schemas import MetricBatch
@@ -199,3 +200,38 @@ def test_baseline_endpoint_against_postgres(scratch_db_url):
         assert [p["samples"] for p in s["points"]] == [30] * len(want)
         assert [p["mean"] for p in s["points"]] == pytest.approx([p.mean for p in want])
         assert [p["stddev"] for p in s["points"]] == pytest.approx([p.stddev for p in want])
+
+
+# --- baseline / spread / deviation (used by anomaly rules, ANOM-02) ---
+
+
+def test_baseline_of_a_set_of_values():
+    values = [2, 4, 4, 4, 5, 5, 7, 9]
+
+    b = baseline(values, min_samples=2)
+
+    assert (b.samples, b.mean) == (8, pytest.approx(5.0))
+    assert b.stddev == pytest.approx(statistics.stdev(values))
+
+
+def test_baseline_is_none_below_the_minimum():
+    assert baseline([1.0] * 29) is None
+    assert baseline([1.0] * 30) is not None
+
+
+def test_deviation_is_in_standard_deviations_signed_by_direction():
+    assert deviation(56.0, 50.0, 2.0) == pytest.approx(3.0)
+    assert deviation(44.0, 50.0, 2.0) == pytest.approx(-3.0)
+
+
+def test_spread_is_floored_at_one_percent_of_the_mean():
+    assert spread(50.0, 0.0) == pytest.approx(0.5)
+    assert spread(-50.0, 0.1) == pytest.approx(0.5)
+    assert spread(50.0, 2.0) == 2.0
+    assert deviation(52.0, 50.0, 0.0) == pytest.approx(4.0)
+
+
+def test_deviation_from_a_constant_zero_baseline():
+    assert deviation(0.0, 0.0, 0.0) == 0.0
+    assert deviation(0.5, 0.0, 0.0) == math.inf
+    assert deviation(-0.5, 0.0, 0.0) == -math.inf

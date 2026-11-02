@@ -34,6 +34,10 @@ function alert(overrides: Partial<Alert> = {}): Alert {
     resolve_reason: null,
     last_value: 95.5,
     last_evaluated_at: NOW,
+    kind: "threshold",
+    baseline_seconds: null,
+    last_baseline_mean: null,
+    last_baseline_stddev: null,
     ...overrides,
   };
 }
@@ -146,6 +150,37 @@ describe("AlertsPage", () => {
     expect(c.getByText("Fired").nextSibling).toHaveTextContent("5m ago");
     expect(c.getByText("Firing for").nextSibling).toHaveTextContent("5m so far");
     expect(c.queryByText("Resolved")).not.toBeInTheDocument();
+  });
+
+  it("shows an anomaly alert's condition and the baseline it was compared against", async () => {
+    fetchAlerts.mockResolvedValue(
+      history([
+        alert({
+          kind: "anomaly",
+          threshold: 3,
+          baseline_seconds: 3600,
+          duration_seconds: 60,
+          last_baseline_mean: 22.4,
+          last_baseline_stddev: 6.123456789,
+        }),
+      ]),
+    );
+
+    renderAlerts();
+    await flush();
+
+    const c = card("High CPU on web-1");
+    expect(c.getByText("cpu.usage > baseline + 3σ (1h window) for 1m")).toBeInTheDocument();
+    expect(c.getByText("Baseline").nextSibling).toHaveTextContent("22.4 ± 6.12346 percent");
+  });
+
+  it("shows no baseline for a threshold alert", async () => {
+    fetchAlerts.mockResolvedValue(history([alert()]));
+
+    renderAlerts();
+    await flush();
+
+    expect(card("High CPU on web-1").queryByText("Baseline")).not.toBeInTheDocument();
   });
 
   it("shows a recovered alert with when it resolved and how long it fired", async () => {

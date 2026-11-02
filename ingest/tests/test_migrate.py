@@ -273,3 +273,59 @@ def test_deleting_a_host_removes_its_alerts(scratch_db_url):
         conn.execute("DELETE FROM hosts WHERE id = %s", (host_id,))
 
         assert conn.execute("SELECT count(*) FROM alerts").fetchone()[0] == 0
+
+
+def _insert_anomaly_rule(conn, **overrides):
+    row = {"operator": ">", "threshold": 3.0, "kind": "anomaly", "baseline_seconds": 3600}
+    row.update(overrides)
+    return conn.execute(
+        "INSERT INTO alert_rules (name, metric_name, operator, threshold, duration_seconds, kind, baseline_seconds) "
+        "VALUES ('Odd CPU', 'cpu.usage', %(operator)s, %(threshold)s, 60, %(kind)s, %(baseline_seconds)s) "
+        "RETURNING id",
+        row,
+    ).fetchone()[0]
+
+
+def test_existing_rules_and_alerts_become_threshold_ones(scratch_db_url):
+    apply_migrations(scratch_db_url)
+
+    with psycopg.connect(scratch_db_url) as conn:
+        rule_id = _insert_rule(conn)
+        kind, baseline = conn.execute(
+            "SELECT kind, baseline_seconds FROM alert_rules WHERE id = %s", (rule_id,)
+        ).fetchone()
+
+    assert (kind, baseline) == ("threshold", None)
+
+
+@pytest.mark.parametrize(
+    "overrides",
+    [{"operator": "<", "threshold": -3.0}, {"operator": ">=", "threshold": 0.5, "baseline_seconds": 60}],
+)
+def test_anomaly_rule_constraints_accept_good_rows(scratch_db_url, overrides):
+    apply_migrations(scratch_db_url)
+
+    with psycopg.connect(scratch_db_url) as conn:
+        _insert_anomaly_rule(conn, **overrides)
+
+
+@pytest.mark.parametrize(
+    "overrides",
+    [
+        {"kind": "forecast"},
+        {"baseline_seconds": None},
+        {"kind": "threshold"},
+        {"baseline_seconds": 59},
+        {"baseline_seconds": 86401},
+        {"operator": ">", "threshold": -3.0},
+        {"operator": ">=", "threshold": 0.0},
+        {"operator": "<", "threshold": 3.0},
+        {"operator": "<=", "threshold": 0.0},
+    ],
+)
+def test_anomaly_rule_constraints_reject_bad_rows(scratch_db_url, overrides):
+    apply_migrations(scratch_db_url)
+
+    with psycopg.connect(scratch_db_url) as conn:
+        with pytest.raises(psycopg.errors.IntegrityError):
+            _insert_anomaly_rule(conn, **overrides)

@@ -36,6 +36,20 @@ export function describeSeries(alert: Pick<Alert, "metric_name" | "tags">): stri
 
 /** 95 -> "95 percent", 37.123456 -> "37.1235 percent" (6 significant digits). */
 export function formatAlertValue(value: number, unit: string): string {
-  const number = Number.isInteger(value) ? String(value) : String(Number(value.toPrecision(6)));
-  return `${number} ${unit}`;
+  return `${formatNumber(value)} ${unit}`;
+}
+
+/** An anomaly alert's last baseline, "22.4 ± 6.1 percent", or null for a
+ * threshold alert. */
+export function formatBaseline(
+  alert: Pick<Alert, "kind" | "unit" | "last_baseline_mean" | "last_baseline_stddev">,
+): string | null {
+  if (alert.kind !== "anomaly" || alert.last_baseline_mean === null || alert.last_baseline_stddev === null) {
+    return null;
+  }
+  return `${formatNumber(alert.last_baseline_mean)} ± ${formatNumber(alert.last_baseline_stddev)} ${alert.unit}`;
+}
+
+function formatNumber(value: number): string {
+  return Number.isInteger(value) ? String(value) : String(Number(value.toPrecision(6)));
 }

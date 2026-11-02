@@ -510,3 +510,169 @@ def test_tracker_resolves_unevaluated_alerts_once_caught_up():
     (change,) = AlertTracker(store)([], LATER, False)
 
     assert change.after.resolve_reason == "not_evaluated"
+
+
+# --- anomaly rules (ANOM-02) ---
+
+# Alternating 48/52: a baseline of mean 50, stddev just over 2.
+STEADY = [48.0, 52.0] * 20
+
+
+def anomaly_series(*values, operator=">", threshold=3.0, duration=0, baseline=600, **kwargs):
+    return replace(
+        rule_series(*values, operator=operator, threshold=threshold, duration=duration, **kwargs),
+        kind="anomaly",
+        baseline_seconds=baseline,
+    )
+
+
+def test_anomaly_rule_breaches_when_the_latest_sample_is_far_above_its_baseline():
+    e = verdict(anomaly_series(*STEADY, 70.0))
+
+    assert (e.breaching, e.sustained, e.breaching_since) == (True, True, NOW)
+    assert e.baseline_mean == pytest.approx(50.0)
+    assert e.baseline_stddev == pytest.approx(2.0, abs=0.1)
+
+
+def test_anomaly_rule_is_ok_within_n_sigma_and_still_reports_the_baseline():
+    e = verdict(anomaly_series(*STEADY, 54.0))
+
+    assert e.breaching is False
+    assert e.baseline_mean == pytest.approx(50.0)
+
+
+def test_anomaly_rule_with_a_high_absolute_value_is_ok_if_that_is_normal_for_the_series():
+    # 95% CPU would breach a "> 80" threshold rule, but it's this series' norm.
+    assert verdict(anomaly_series(*[94.0, 96.0] * 20, 95.5)).breaching is False
+
+
+def test_above_rule_ignores_a_drop_and_below_rule_catches_it():
+    drop = (*STEADY, 30.0)
+
+    assert verdict(anomaly_series(*drop)).breaching is False
+    assert verdict(anomaly_series(*drop, operator="<", threshold=-3.0)).breaching is True
+
+
+def test_anomaly_series_without_a_baseline_yet_is_not_evaluated():
+    # 29 earlier samples: one short of MIN_BASELINE_SAMPLES.
+    series = anomaly_series(*[50.0] * 29, 500.0)
+
+    assert evaluate([series]) == []
+
+
+def test_anomaly_run_must_hold_for_the_duration():
+    short = verdict(anomaly_series(*STEADY, 70.0, 71.0, duration=30))
+    held = verdict(anomaly_series(*STEADY, 70.0, 71.0, 69.0, 72.0, duration=30))
+
+    assert (short.breaching, short.sustained, short.breaching_since) == (True, False, NOW - 10)
+    assert (held.sustained, held.breaching_since) == (True, NOW - 30)
+
+
+def test_a_lasting_jump_is_judged_against_the_baseline_from_before_it():
+    # 7 samples at 70 over 60s. Each one's own rolling baseline would soak up
+    # the earlier 70s and stop calling it unusual within a few samples, so
+    # the whole run is judged against the baseline before the 60s.
+    e = verdict(anomaly_series(*STEADY, *[70.0] * 7, duration=60))
+
+    assert (e.breaching, e.sustained, e.breaching_since) == (True, True, NOW - 60)
+    assert e.baseline_mean == pytest.approx(50.0)
+
+
+def test_a_shift_that_lasts_becomes_the_new_baseline():
+    # Once a whole window of samples sits at the new level, it is the norm.
+    e = verdict(anomaly_series(*STEADY, *[70.0, 71.0] * 40, 70.5, baseline=600))
+
+    assert e.breaching is False
+    assert e.baseline_mean == pytest.approx(70.5, abs=0.1)
+
+
+def test_a_near_constant_series_needs_a_change_of_at_least_n_percent_of_its_mean():
+    # A stddev of 0 would make any change infinitely unusual; the spread is
+    # floored at 1% of the mean (0.5 here), so 3 sigma is 1.5.
+    flat = [50.0] * 40
+
+    assert verdict(anomaly_series(*flat, 51.0)).breaching is False
+    assert verdict(anomaly_series(*flat, 52.0)).breaching is True
+    assert verdict(anomaly_series(*flat, 52.0)).baseline_stddev == pytest.approx(0.5)
+
+
+def test_any_value_breaks_a_baseline_that_was_constantly_zero():
+    e = verdict(anomaly_series(*[0.0] * 40, 1.0))
+
+    assert e.breaching is True
+    assert (e.baseline_mean, e.baseline_stddev) == (0.0, 0.0)
+    assert verdict(anomaly_series(*[0.0] * 40, 0.0)).breaching is False
+
+
+def test_new_anomaly_alert_copies_the_rule_kind_and_its_baseline():
+    (change,) = plan_transitions([], evaluate([anomaly_series(*STEADY, 70.0)]), NOW)
+
+    a = change.after
+    assert (change.kind, a.kind, a.baseline_seconds, a.threshold) == ("fired", "anomaly", 600, 3.0)
+    assert a.last_baseline_mean == pytest.approx(50.0)
+    assert a.last_baseline_stddev > 0
+
+
+def open_anomaly_alert(*values, **kwargs):
+    """The alert a rule opened on this series, as stored (with an id)."""
+    (opened,) = plan_transitions([], evaluate([anomaly_series(*values, **kwargs)]), NOW)
+    return replace(opened.after, id=1)
+
+
+def test_open_anomaly_alert_keeps_the_baseline_it_opened_with():
+    alert = open_anomaly_alert(*STEADY, 70.0)
+
+    (change,) = plan_transitions([alert], evaluate([anomaly_series(*STEADY, 70.0, 75.0)]), NOW + 10)
+
+    assert (change.kind, change.after.last_value) == ("updated", 75.0)
+    assert (change.after.last_baseline_mean, change.after.last_baseline_stddev) == (
+        alert.last_baseline_mean, alert.last_baseline_stddev
+    )
+
+
+def test_firing_anomaly_alert_stays_firing_while_a_lasting_jump_lasts():
+    # 40 samples at 70 after 40 around 50: by now the moving baseline has
+    # absorbed the jump and a fresh evaluation calls 70 normal...
+    alert = open_anomaly_alert(*STEADY, 70.0)
+    lasting = anomaly_series(*STEADY, *[70.0] * 40)
+    assert verdict(lasting).breaching is False
+
+    # ...but the alert is still judged against the baseline from before it.
+    (change,) = plan_transitions([alert], evaluate([lasting]), NOW + 400)
+
+    assert (change.kind, change.after.state) == ("updated", "firing")
+    assert change.after.last_baseline_mean == pytest.approx(50.0)
+
+
+def test_pending_anomaly_alert_is_judged_against_its_own_baseline():
+    alert = replace(open_anomaly_alert(*STEADY, 70.0, duration=30), state="pending", fired_at=None)
+    later = anomaly_series(*STEADY, *[70.0] * 40, duration=30)
+
+    (change,) = plan_transitions([alert], evaluate([later]), NOW + 400)
+
+    assert change.kind == "fired"
+
+
+def test_alert_of_a_rule_changed_to_a_threshold_rule_is_judged_as_one():
+    alert = open_anomaly_alert(*STEADY, 70.0)
+
+    (change,) = plan_transitions([alert], evaluate([rule_series(*STEADY, 70.0, threshold=80.0)]), NOW + 10)
+
+    assert (change.kind, change.after.resolve_reason) == ("resolved", "recovered")
+    assert (change.after.kind, change.after.last_baseline_mean) == ("threshold", None)
+
+
+def test_anomaly_alert_resolves_as_recovered_once_back_within_n_sigma_of_its_baseline():
+    alert = open_anomaly_alert(*STEADY, 70.0)
+
+    (change,) = plan_transitions([alert], evaluate([anomaly_series(*STEADY, *[70.0] * 40, 53.0)]), NOW + 410)
+
+    assert (change.kind, change.after.resolve_reason) == ("resolved", "recovered")
+
+
+def test_tracker_log_describes_an_anomaly_alert(caplog):
+    _, messages = track(caplog, FakeAlertTrackerStore(), anomaly_series(*STEADY, 70.0))
+
+    (message,) = messages
+    assert message.startswith("Alert 42 FIRING: #1 'High CPU' on web-1: cpu.usage = 70 percent (> baseline +3σ, ")
+    assert ", baseline 50 ± 2." in message

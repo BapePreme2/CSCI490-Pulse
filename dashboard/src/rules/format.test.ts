@@ -17,17 +17,44 @@ describe("formatDuration", () => {
   });
 });
 
+const THRESHOLD = { kind: "threshold", baseline_seconds: null } as const;
+
 describe("describeCondition", () => {
   it("includes the sustained duration", () => {
-    expect(describeCondition({ metric_name: "cpu.usage", operator: ">", threshold: 80, duration_seconds: 300 })).toBe(
+    expect(describeCondition({ ...THRESHOLD, metric_name: "cpu.usage", operator: ">", threshold: 80, duration_seconds: 300 })).toBe(
       "cpu.usage > 80 for 5m",
     );
   });
 
   it("omits the duration for a rule that fires on the first sample", () => {
-    expect(describeCondition({ metric_name: "disk.free", operator: "<", threshold: 2.5, duration_seconds: 0 })).toBe(
+    expect(describeCondition({ ...THRESHOLD, metric_name: "disk.free", operator: "<", threshold: 2.5, duration_seconds: 0 })).toBe(
       "disk.free < 2.5",
     );
+  });
+});
+
+describe("describeCondition for anomaly rules", () => {
+  it("reads as sigma above or below the baseline over its window", () => {
+    expect(
+      describeCondition({
+        kind: "anomaly",
+        baseline_seconds: 3600,
+        metric_name: "cpu.usage",
+        operator: ">",
+        threshold: 3,
+        duration_seconds: 60,
+      }),
+    ).toBe("cpu.usage > baseline + 3σ (1h window) for 1m");
+    expect(
+      describeCondition({
+        kind: "anomaly",
+        baseline_seconds: 900,
+        metric_name: "network.bytes_recv",
+        operator: "<=",
+        threshold: -2.5,
+        duration_seconds: 0,
+      }),
+    ).toBe("network.bytes_recv <= baseline - 2.5σ (15m window)");
   });
 });
 

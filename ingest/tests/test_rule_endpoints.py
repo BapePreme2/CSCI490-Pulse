@@ -48,6 +48,8 @@ def test_create_returns_the_stored_rule_with_defaults_filled_in():
         "host": None,
         "tag_filter": {"core": None},
         "enabled": True,
+        "kind": "threshold",
+        "baseline_seconds": None,
         "created_at": 1000.0,
         "updated_at": 1001.0,
     }
@@ -154,3 +156,26 @@ def test_browser_preflight_allows_editing_and_deleting_rules(method):
 
     assert response.status_code == 200
     assert method in response.headers["access-control-allow-methods"]
+
+
+def test_create_an_anomaly_rule():
+    response = client_for().post(
+        "/rules", json=rule_body(kind="anomaly", operator="<", threshold=-3, duration_seconds=60)
+    )
+
+    assert response.status_code == 201
+    body = response.json()
+    assert (body["kind"], body["operator"], body["threshold"], body["baseline_seconds"]) == ("anomaly", "<", -3.0, 3600)
+
+
+def test_anomaly_rule_with_sigma_against_its_direction_is_a_422():
+    response = client_for().post("/rules", json=rule_body(kind="anomaly", operator=">", threshold=-3))
+
+    assert response.status_code == 422
+    assert "positive threshold" in response.text
+
+
+def test_threshold_rule_with_a_baseline_is_a_422():
+    response = client_for().post("/rules", json=rule_body(baseline_seconds=600))
+
+    assert response.status_code == 422

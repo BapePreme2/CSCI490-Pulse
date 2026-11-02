@@ -314,6 +314,8 @@ by `AlertRuleIn` (`pulse_ingest/schemas.py`).
 | `duration_seconds` | How long the condition must hold before the rule fires. `0` fires on the first breaching sample. 0-86400. |
 | `host` | A hostname, or `null` for fleet-wide. Stored as `host_id`, so deleting a host deletes its own rules but not fleet-wide ones. |
 | `tag_filter` | Narrows which series the rule watches (see below). Defaults to `{}`, every series of that metric. |
+| `kind` | `threshold` (the default, everything in this section) or `anomaly` (see [Anomaly rules](#anomaly-rules-anom-02)). |
+| `baseline_seconds` | Anomaly rules only: the baseline window, 60-86400, default 3600. Must be absent for threshold rules. |
 
 **Each series is evaluated on its own.** A rule watches every series
 (host + tag set) that matches it, and each one can be OK or firing
@@ -745,9 +747,87 @@ curl "http://127.0.0.1:8000/hosts/web-1/metrics/cpu.usage/baseline?window=3600"
 - `404` for an unknown host, `503` if the database is unreachable. A series
   with samples only before `start` is left out.
 
-This is the groundwork for an anomaly rule type (ANOM-02: alert when a value
-is more than N standard deviations from its baseline) and for anomaly
-markers on the dashboard's charts (DASH-10).
+Anomaly rules (below) use the same baseline, and the dashboard's anomaly
+markers will too (DASH-10).
+
+## Anomaly rules (ANOM-02)
+
+A threshold rule needs someone to know what "too high" is for every host and
+series. An anomaly rule instead fires when a value is unusual *for that
+series*: more than N standard deviations (σ) from its own baseline. One
+fleet-wide rule covers a host that idles at 5% CPU and one that runs at 90%.
+
+```json
+{"name": "CPU spike", "metric_name": "cpu.usage", "kind": "anomaly",
+ "operator": ">", "threshold": 3, "baseline_seconds": 3600,
+ "duration_seconds": 60, "tag_filter": {"core": null}}
+```
+
+reads as `cpu.usage > baseline + 3σ (1h window) for 1m`. It's the same rule
+shape with two more fields (`migrations/005_anomaly_rules.sql`), and the
+threshold now means a number of σ:
+
+- **Direction comes from the operator.** `>`/`>=` need a positive threshold
+  ("3σ above"), `<`/`<=` a negative one (`<` with `-3` is "3σ below"). The
+  other way round (`> baseline - 2σ`) would be true nearly all the time, so
+  the API and the database both reject it. To catch both directions, make
+  two rules.
+- **The same machinery as threshold rules.** The evaluator turns each sample
+  into its deviation (`(value - mean) / σ`) and then applies the operator,
+  threshold, sustained-duration walk, and alert state machine exactly as for
+  a threshold rule's raw value. Notifications and the alert history say
+  which kind it was, and show the baseline it was compared against:
+
+```
+  Value:           99.7 percent
+  Condition:       cpu.usage > baseline + 3σ (1m window) for 3s
+  Baseline:        0.973333 ± 0.563431 percent
+  Deviation:       +175.2σ
+```
+
+**Which baseline.** The samples that have to be unusual for the rule to fire
+must not count toward what's usual, or a lasting jump drags the baseline up
+behind it. With a rolling baseline per sample, a jump stops looking unusual
+after roughly `baseline_seconds / N²` (about 7 minutes for 1h at 3σ, about 7
+seconds for 1m), which can be shorter than the rule's duration, so the rule
+would never fire. Two rules prevent that:
+
+- A series with no open alert is judged against the `baseline_seconds`
+  **before** the last `duration_seconds`. With duration 0 that's exactly
+  the ANOM-01 baseline of the latest sample.
+- **An open alert keeps the baseline it opened with** (stored on the alert,
+  so it survives an API restart). A firing alert resolves as `recovered`
+  only once the value is back within Nσ of what was normal *before the
+  anomaly began*. Running this against a real CPU spike found the problem:
+  before this rule, an alert on a 20-second spike to 100% "recovered" after
+  5 seconds, with the CPU still at 98.6%, because the spike had already
+  pulled the moving baseline up to 11 ± 29%.
+
+A consequence of the second rule: a change that's permanent (more RAM, a
+deploy with a higher steady CPU) keeps its alert firing until the value
+comes back. Disabling the rule resolves the alert (as no longer evaluated),
+and once enabled again the rule judges against the new level.
+
+**Too little spread.** A series that barely moves (`disk.usage`,
+`memory.total`) has a standard deviation at or near 0, so any wobble would
+be "100σ away". Deviations are measured in at least 1% of the baseline mean
+(`MIN_RELATIVE_SPREAD` in `pulse_ingest/anomaly.py`): with a baseline of
+50% disk use, a 3σ rule needs at least a 1.5-point change. A baseline that
+was constantly 0 (`network.errors` on a healthy host) has no spread at all,
+so any non-zero value is infinitely far off and breaches. That's a real
+change worth flagging.
+
+**No baseline, no verdict.** A series whose baseline window holds fewer than
+30 samples (a host's first five minutes at the default 10s interval) isn't
+evaluated at all, the same as a series that stopped reporting: there's
+nothing to judge it against, so it is neither breaching nor OK.
+
+**Cost.** Each cycle fetches `duration_seconds + baseline_seconds + 30s` of
+samples per matching series instead of `duration_seconds + 30s`, so an
+anomaly rule with a 1h baseline reads about 400 samples per series every 10
+seconds. That's fine at this project's scale; at 24h it's about 8,700, and a
+fleet-wide rule on a per-core metric multiplies that by every core of every
+host.
 
 ## Smoke test (OPS-02)
 
@@ -870,3 +950,4 @@ half-applied. To add one, create the next numbered file, e.g.
 | Task | File(s) |
 | --- | --- |
 | ANOM-01 rolling mean / std-dev baseline per series | `pulse_ingest/anomaly.py` (`rolling_baseline`), `pulse_ingest/app.py` (`GET /hosts/{host}/metrics/{name}/baseline`, `_time_range`), `tests/test_anomaly.py`, `tests/test_dashboard_endpoints.py`, `tests/fakes.py` |
+| ANOM-02 anomaly rule type | `migrations/005_anomaly_rules.sql`, `pulse_ingest/schemas.py` (`kind`, `baseline_seconds`), `pulse_ingest/anomaly.py` (`baseline`, `spread`, `deviation`), `pulse_ingest/alerts.py` (`_evaluate`, `Evaluation.against`, `plan_transitions`), `pulse_ingest/store.py`, `pulse_ingest/notify.py` (`_condition`, `_baseline_details`), `pulse_ingest/app.py`, `tests/test_alerts.py`, `tests/test_anomaly.py`, `tests/test_schemas.py`, `tests/test_migrate.py`, `tests/test_alert_queries.py`, `tests/test_alert_store.py`, `tests/test_rule_store.py`, `tests/test_rule_endpoints.py`, `tests/test_notify.py`; UI in `dashboard/` |

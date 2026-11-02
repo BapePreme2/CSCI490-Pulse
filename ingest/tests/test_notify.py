@@ -658,3 +658,56 @@ def test_failed_slack_posts_are_retried_and_logged_without_the_url(webhook_sink,
         in caplog.text
     )
     assert "secret-token" not in caplog.text
+
+
+# --- anomaly alerts (ANOM-02) ---
+
+
+def anomaly(**overrides):
+    fields = dict(
+        kind="anomaly", operator=">", threshold=3.0, duration_seconds=60, baseline_seconds=3600,
+        last_value=91.5, last_baseline_mean=22.4, last_baseline_stddev=6.1,
+    )
+    fields.update(overrides)
+    return fields
+
+
+def test_fired_anomaly_email_shows_the_baseline_and_how_far_off_the_value_was():
+    text = body(build_email(fired(**anomaly()), config(), FIRED_AT))
+
+    assert "  Value:           91.5 percent\n" in text
+    assert "  Condition:       cpu.usage > baseline + 3σ (1h window) for 1m\n" in text
+    assert "  Baseline:        22.4 ± 6.1 percent\n" in text
+    assert "  Deviation:       +11.3σ\n" in text
+
+
+def test_below_baseline_condition_and_deviation():
+    text = body(build_email(fired(**anomaly(operator="<", threshold=-2.5, duration_seconds=0, last_value=4.0)), config(), FIRED_AT))
+
+    assert "  Condition:       cpu.usage < baseline - 2.5σ (1h window)\n" in text
+    assert "  Deviation:       -3.0σ\n" in text
+
+
+def test_deviation_from_a_baseline_that_was_constantly_zero():
+    text = body(build_email(fired(**anomaly(last_value=2.0, last_baseline_mean=0.0, last_baseline_stddev=0.0)), config(), FIRED_AT))
+
+    assert "  Deviation:       any change from a constant baseline\n" in text
+
+
+def test_recovered_anomaly_email_says_it_is_back_within_n_sigma():
+    text = body(build_email(resolved("recovered", **anomaly()), config(), FIRED_AT + 425))
+
+    assert " ".join(text.split()).startswith("High CPU on web-1 has RESOLVED: the value is back within 3σ of its baseline. ")
+
+
+def test_threshold_alert_email_has_no_baseline_lines():
+    text = body(build_email(fired(), config(), FIRED_AT))
+
+    assert "Baseline" not in text and "Deviation" not in text
+
+
+def test_slack_message_for_an_anomaly_alert_includes_the_baseline():
+    fields = build_slack_message(fired(**anomaly()))["attachments"][0]["blocks"][1]["fields"]
+
+    assert {"type": "mrkdwn", "text": "*Baseline*\n22.4 ± 6.1 percent"} in fields
+    assert {"type": "mrkdwn", "text": "*Condition*\ncpu.usage &gt; baseline + 3σ (1h window) for 1m"} in fields

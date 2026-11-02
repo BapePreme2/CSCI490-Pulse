@@ -51,6 +51,12 @@ export type HostSummary = FleetHost;
 
 export type Operator = ">" | ">=" | "<" | "<=";
 
+/** "threshold" compares each sample's value with `threshold`. "anomaly"
+ * compares how many standard deviations it is from the series' baseline over
+ * the trailing `baseline_seconds`: `>` 3 is "more than 3σ above", `<` -3
+ * "more than 3σ below". */
+export type RuleKind = "threshold" | "anomaly";
+
 /** What the API accepts to create or replace a rule (`AlertRuleIn`). */
 export interface AlertRuleInput {
   name: string;
@@ -63,6 +69,9 @@ export interface AlertRuleInput {
   /** A string value requires that tag value; null requires the tag to be absent. */
   tag_filter: Record<string, string | null>;
   enabled: boolean;
+  kind: RuleKind;
+  /** Anomaly rules only; null for threshold rules. */
+  baseline_seconds: number | null;
 }
 
 export interface AlertRule extends AlertRuleInput {
@@ -103,6 +112,12 @@ export interface Alert {
   resolve_reason: ResolveReason | null;
   last_value: number;
   last_evaluated_at: number;
+  kind: RuleKind;
+  baseline_seconds: number | null;
+  /** Anomaly alerts: the baseline the last evaluation compared against, the
+   * stddev being the spread the deviation was measured in. */
+  last_baseline_mean: number | null;
+  last_baseline_stddev: number | null;
 }
 
 export interface AlertHistoryResponse {

@@ -147,3 +147,53 @@ def test_deleting_a_rule_resolves_its_firing_alert_on_the_next_cycle(store, db_u
     assert query(db_url, "SELECT rule_id, rule_name, state, resolve_reason FROM alerts") == [
         (None, "High CPU", "resolved", "not_evaluated")
     ]
+
+
+def test_anomaly_rule_reads_back_with_its_kind_and_baseline(store):
+    created = store.create_rule(rule(kind="anomaly", operator="<", threshold=-2.5, baseline_seconds=900))
+
+    assert (created.kind, created.operator, created.threshold, created.baseline_seconds) == ("anomaly", "<", -2.5, 900)
+    assert store.get_rule(created.id) == created
+
+
+def test_update_can_turn_a_threshold_rule_into_an_anomaly_rule_and_back(store):
+    created = store.create_rule(rule())
+
+    anomaly = store.update_rule(created.id, rule(kind="anomaly", threshold=3))
+    threshold = store.update_rule(created.id, rule(threshold=90))
+
+    assert (anomaly.kind, anomaly.baseline_seconds) == ("anomaly", 3600)
+    assert (threshold.kind, threshold.baseline_seconds) == ("threshold", None)
+
+
+def test_an_anomaly_rule_fires_on_a_spike_and_stores_its_baseline(store, db_url):
+    now = time.time()
+    store.create_rule(rule(kind="anomaly", threshold=3, baseline_seconds=600, tag_filter={"core": None}))
+    for i in range(40):
+        register(store, value=20.0 + (i % 2) * 4, ts=now - 400 + i * 10)
+    evaluator = RuleEvaluator(store, AlertTracker(store), clock=lambda: now)
+    register(store, value=23.0, ts=now)
+    evaluator.evaluate_once()
+    assert query(db_url, "SELECT count(*) FROM alerts") == [(0,)]
+
+    register(store, value=60.0, ts=now + 10)
+    RuleEvaluator(store, AlertTracker(store), clock=lambda: now + 10).evaluate_once()
+
+    ((state, kind, baseline, value, mean, spread),) = query(
+        db_url, "SELECT state, kind, baseline_seconds, last_value, last_baseline_mean, last_baseline_stddev FROM alerts"
+    )
+    assert (state, kind, baseline, value) == ("firing", "anomaly", 600, 60.0)
+    assert mean == pytest.approx(22.0, abs=0.1)
+    assert spread == pytest.approx(2.0, abs=0.1)
+
+    # Five minutes at 60 would be the norm for a fresh baseline, but the open
+    # alert keeps the one it fired with (read back from Postgres)...
+    for i in range(1, 31):
+        register(store, value=60.0, ts=now + 10 + i * 10)
+    RuleEvaluator(store, AlertTracker(store), clock=lambda: now + 310).evaluate_once()
+    assert query(db_url, "SELECT state, last_baseline_mean FROM alerts") == [("firing", mean)]
+
+    # ...so it resolves when the value is back near 22, not before.
+    register(store, value=23.0, ts=now + 320)
+    RuleEvaluator(store, AlertTracker(store), clock=lambda: now + 320).evaluate_once()
+    assert query(db_url, "SELECT state, resolve_reason FROM alerts") == [("resolved", "recovered")]

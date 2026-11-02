@@ -105,9 +105,11 @@ ORDER BY m.unit, v.tags, v.ts
 # Every series each enabled rule watches whose latest sample is at or after
 # `since`, with that series' samples from (duration_seconds + padding) before
 # its latest sample onward: the sliding window ALERT-03's sustained-duration
-# check walks back through. A rule's tag_filter matches a series when its
-# non-null values are contained in the series' tags and none of its
-# null-valued keys are present at all (see migrations/003_alert_rules.sql).
+# check walks back through. An anomaly rule's window reaches baseline_seconds
+# further back, so every sample in it has its own full baseline behind it.
+# A rule's tag_filter matches a series when its non-null values are
+# contained in the series' tags and none of its null-valued keys are present
+# at all (see migrations/003_alert_rules.sql).
 #
 # The inner ts filter only bounds the scan: since a kept series' latest
 # sample is >= since, none of its window starts earlier than that bound.
@@ -115,14 +117,17 @@ _RULE_SERIES_QUERY = """
 WITH matched AS (
     SELECT
         r.id AS rule_id, r.name AS rule_name, r.metric_name, r.operator, r.threshold,
-        r.duration_seconds, v.host_id, v.metric_id, v.tags, v.ts, v.value,
+        r.duration_seconds, r.kind, r.baseline_seconds,
+        r.duration_seconds + coalesce(r.baseline_seconds, 0) AS reach_seconds,
+        v.host_id, v.metric_id, v.tags, v.ts, v.value,
         max(v.ts) OVER (PARTITION BY r.id, v.host_id, v.metric_id, v.tags) AS latest_ts
     FROM alert_rules r
     JOIN metrics m ON m.name = r.metric_name
     JOIN metric_values v ON v.metric_id = m.id
     WHERE r.enabled
       AND (r.host_id IS NULL OR r.host_id = v.host_id)
-      AND v.ts >= to_timestamp(%(since)s) - (r.duration_seconds + %(padding)s) * interval '1 second'
+      AND v.ts >= to_timestamp(%(since)s)
+          - (r.duration_seconds + coalesce(r.baseline_seconds, 0) + %(padding)s) * interval '1 second'
       AND v.tags @> jsonb_strip_nulls(r.tag_filter)
       AND NOT (v.tags ?| ARRAY(
           SELECT key FROM jsonb_each(r.tag_filter) WHERE value = 'null'::jsonb
@@ -130,12 +135,12 @@ WITH matched AS (
 )
 SELECT
     x.rule_id, x.rule_name, x.metric_name, x.operator, x.threshold, x.duration_seconds,
-    x.host_id, h.hostname, m.unit, x.tags, extract(epoch FROM x.ts), x.value
+    x.kind, x.baseline_seconds, x.host_id, h.hostname, m.unit, x.tags, extract(epoch FROM x.ts), x.value
 FROM matched x
 JOIN hosts h ON h.id = x.host_id
 JOIN metrics m ON m.id = x.metric_id
 WHERE x.latest_ts >= to_timestamp(%(since)s)
-  AND x.ts >= x.latest_ts - (x.duration_seconds + %(padding)s) * interval '1 second'
+  AND x.ts >= x.latest_ts - (x.reach_seconds + %(padding)s) * interval '1 second'
 ORDER BY x.rule_id, x.host_id, x.metric_id, x.tags, x.ts
 """
 
@@ -145,7 +150,8 @@ SELECT
     a.rule_name, a.metric_name, a.operator, a.threshold, a.duration_seconds,
     a.state, extract(epoch FROM a.pending_since), extract(epoch FROM a.fired_at),
     extract(epoch FROM a.resolved_at), a.resolve_reason, a.last_value,
-    extract(epoch FROM a.last_evaluated_at)
+    extract(epoch FROM a.last_evaluated_at), a.kind, a.baseline_seconds,
+    a.last_baseline_mean, a.last_baseline_stddev
 FROM alerts a
 JOIN hosts h ON h.id = a.host_id
 """
@@ -176,12 +182,13 @@ _INSERT_ALERT = """
 INSERT INTO alerts (
     rule_id, host_id, unit, tags, rule_name, metric_name, operator, threshold,
     duration_seconds, state, pending_since, fired_at, resolved_at, resolve_reason,
-    last_value, last_evaluated_at
+    last_value, last_evaluated_at, kind, baseline_seconds, last_baseline_mean, last_baseline_stddev
 ) VALUES (
     %(rule_id)s, %(host_id)s, %(unit)s, %(tags)s, %(rule_name)s, %(metric_name)s,
     %(operator)s, %(threshold)s, %(duration_seconds)s, %(state)s,
     to_timestamp(%(pending_since)s), to_timestamp(%(fired_at)s), to_timestamp(%(resolved_at)s),
-    %(resolve_reason)s, %(last_value)s, to_timestamp(%(last_evaluated_at)s)
+    %(resolve_reason)s, %(last_value)s, to_timestamp(%(last_evaluated_at)s),
+    %(kind)s, %(baseline_seconds)s, %(last_baseline_mean)s, %(last_baseline_stddev)s
 )
 RETURNING id
 """
@@ -193,7 +200,9 @@ UPDATE alerts SET
     threshold = %(threshold)s, duration_seconds = %(duration_seconds)s, state = %(state)s,
     pending_since = to_timestamp(%(pending_since)s), fired_at = to_timestamp(%(fired_at)s),
     resolved_at = to_timestamp(%(resolved_at)s), resolve_reason = %(resolve_reason)s,
-    last_value = %(last_value)s, last_evaluated_at = to_timestamp(%(last_evaluated_at)s)
+    last_value = %(last_value)s, last_evaluated_at = to_timestamp(%(last_evaluated_at)s),
+    kind = %(kind)s, baseline_seconds = %(baseline_seconds)s,
+    last_baseline_mean = %(last_baseline_mean)s, last_baseline_stddev = %(last_baseline_stddev)s
 WHERE id = %(id)s
 """
 
@@ -204,15 +213,17 @@ _RULE_SELECT = """
 SELECT
     r.id, r.name, r.metric_name, r.operator, r.threshold, r.duration_seconds,
     h.hostname, r.tag_filter, r.enabled,
-    extract(epoch FROM r.created_at), extract(epoch FROM r.updated_at)
+    extract(epoch FROM r.created_at), extract(epoch FROM r.updated_at), r.kind, r.baseline_seconds
 FROM alert_rules r
 LEFT JOIN hosts h ON h.id = r.host_id
 """
 
 _INSERT_RULE = """
-INSERT INTO alert_rules (name, metric_name, operator, threshold, duration_seconds, host_id, tag_filter, enabled)
+INSERT INTO alert_rules (
+    name, metric_name, operator, threshold, duration_seconds, host_id, tag_filter, enabled, kind, baseline_seconds
+)
 VALUES (%(name)s, %(metric_name)s, %(operator)s, %(threshold)s, %(duration_seconds)s,
-        %(host_id)s, %(tag_filter)s, %(enabled)s)
+        %(host_id)s, %(tag_filter)s, %(enabled)s, %(kind)s, %(baseline_seconds)s)
 RETURNING id
 """
 
@@ -221,7 +232,7 @@ UPDATE alert_rules SET
     name = %(name)s, metric_name = %(metric_name)s, operator = %(operator)s,
     threshold = %(threshold)s, duration_seconds = %(duration_seconds)s,
     host_id = %(host_id)s, tag_filter = %(tag_filter)s, enabled = %(enabled)s,
-    updated_at = now()
+    kind = %(kind)s, baseline_seconds = %(baseline_seconds)s, updated_at = now()
 WHERE id = %(id)s
 RETURNING id
 """
@@ -271,9 +282,14 @@ class HistorySeries:
     points: list[HistoryPoint] = field(default_factory=list)
 
 
+RuleKind = Literal["threshold", "anomaly"]
+
+
 @dataclass(frozen=True)
 class RuleSeries:
-    """The recent samples of one series an alert rule watches, oldest first."""
+    """The recent samples of one series an alert rule watches, oldest first.
+    For an anomaly rule they reach `baseline_seconds` further back, to give
+    each sample in the sustained-duration window its own baseline."""
 
     rule_id: int
     rule_name: str
@@ -286,6 +302,8 @@ class RuleSeries:
     unit: str
     tags: dict[str, str]
     points: list[HistoryPoint] = field(default_factory=list)
+    kind: RuleKind = "threshold"
+    baseline_seconds: int | None = None
 
 
 @dataclass(frozen=True)
@@ -303,6 +321,9 @@ class AlertRule:
     enabled: bool
     created_at: float
     updated_at: float
+    kind: RuleKind = "threshold"
+    # Anomaly rules only.
+    baseline_seconds: int | None = None
 
 
 class UnknownHostError(Exception):
@@ -339,6 +360,12 @@ class Alert:
     fired_at: float | None = None
     resolved_at: float | None = None
     resolve_reason: ResolveReason | None = None
+    kind: RuleKind = "threshold"
+    baseline_seconds: int | None = None
+    # Anomaly alerts: the baseline the last evaluation compared against, with
+    # the stddev as the spread the deviation was measured in (anomaly.spread).
+    last_baseline_mean: float | None = None
+    last_baseline_stddev: float | None = None
 
 
 @dataclass(frozen=True)
@@ -527,7 +554,10 @@ class PostgresMetricStore:
         # Rows arrive grouped by series (the ORDER BY), so a new series starts
         # whenever the key changes.
         result: list[RuleSeries] = []
-        for rule_id, rule_name, metric_name, op, threshold, duration, host_id, hostname, unit, tags, ts, value in rows:
+        for (
+            rule_id, rule_name, metric_name, op, threshold, duration, kind, baseline, host_id, hostname, unit, tags,
+            ts, value,
+        ) in rows:
             current = result[-1] if result else None
             if current is None or (current.rule_id, current.hostname, current.unit, current.tags) != (
                 rule_id, hostname, unit, tags
@@ -543,6 +573,8 @@ class PostgresMetricStore:
                     hostname=hostname,
                     unit=unit,
                     tags=tags,
+                    kind=kind,
+                    baseline_seconds=baseline,
                 )
                 result.append(current)
             current.points.append(HistoryPoint(timestamp=float(ts), value=value))
@@ -591,6 +623,8 @@ class PostgresMetricStore:
             "host_id": host_id,
             "tag_filter": Jsonb(rule.tag_filter),
             "enabled": rule.enabled,
+            "kind": rule.kind,
+            "baseline_seconds": rule.baseline_seconds,
         }
 
     def open_alerts(self) -> list[Alert]:
@@ -629,7 +663,7 @@ class PostgresMetricStore:
 
 
 def _rule_from_row(row) -> AlertRule:
-    rule_id, name, metric_name, op, threshold, duration, host, tag_filter, enabled, created, updated = row
+    rule_id, name, metric_name, op, threshold, duration, host, tag_filter, enabled, created, updated, kind, baseline = row
     return AlertRule(
         id=rule_id,
         name=name,
@@ -642,6 +676,8 @@ def _rule_from_row(row) -> AlertRule:
         enabled=enabled,
         created_at=float(created),
         updated_at=float(updated),
+        kind=kind,
+        baseline_seconds=baseline,
     )
 
 
@@ -649,7 +685,7 @@ def _alert_from_row(row) -> Alert:
     (
         alert_id, rule_id, host_id, hostname, unit, tags, rule_name, metric_name, op,
         threshold, duration, state, pending_since, fired_at, resolved_at, reason,
-        last_value, evaluated_at,
+        last_value, evaluated_at, kind, baseline, baseline_mean, baseline_stddev,
     ) = row
     return Alert(
         id=alert_id,
@@ -670,6 +706,10 @@ def _alert_from_row(row) -> Alert:
         resolve_reason=reason,
         last_value=last_value,
         last_evaluated_at=float(evaluated_at),
+        kind=kind,
+        baseline_seconds=baseline,
+        last_baseline_mean=baseline_mean,
+        last_baseline_stddev=baseline_stddev,
     )
 
 
@@ -696,4 +736,8 @@ def _alert_params(a: Alert) -> dict:
         "resolve_reason": a.resolve_reason,
         "last_value": a.last_value,
         "last_evaluated_at": a.last_evaluated_at,
+        "kind": a.kind,
+        "baseline_seconds": a.baseline_seconds,
+        "last_baseline_mean": a.last_baseline_mean,
+        "last_baseline_stddev": a.last_baseline_stddev,
     }

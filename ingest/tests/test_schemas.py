@@ -156,3 +156,49 @@ def test_rule_requires_core_fields(field):
 
     with pytest.raises(ValidationError):
         AlertRuleIn(**data)
+
+
+# --- anomaly rules (ANOM-02) ---
+
+
+def anomaly_rule(**overrides):
+    return valid_rule(**{"kind": "anomaly", "threshold": 3, "duration_seconds": 60, **overrides})
+
+
+def test_rules_are_threshold_rules_by_default():
+    rule = AlertRuleIn(**valid_rule())
+
+    assert (rule.kind, rule.baseline_seconds) == ("threshold", None)
+
+
+def test_anomaly_rule_baseline_defaults_to_an_hour():
+    assert AlertRuleIn(**anomaly_rule()).baseline_seconds == 3600
+
+
+@pytest.mark.parametrize("operator, threshold", [(">", 3), (">=", 0.5), ("<", -3), ("<=", -2.5)])
+def test_anomaly_rule_accepts_sigma_in_the_operators_direction(operator, threshold):
+    rule = AlertRuleIn(**anomaly_rule(operator=operator, threshold=threshold, baseline_seconds=600))
+
+    assert (rule.operator, rule.threshold, rule.baseline_seconds) == (operator, threshold, 600)
+
+
+@pytest.mark.parametrize("operator, threshold", [(">", 0), (">", -3), (">=", -1), ("<", 0), ("<", 3), ("<=", 1)])
+def test_anomaly_rule_rejects_sigma_against_the_operators_direction(operator, threshold):
+    with pytest.raises(ValidationError, match="anomaly rule"):
+        AlertRuleIn(**anomaly_rule(operator=operator, threshold=threshold))
+
+
+@pytest.mark.parametrize("seconds", [59, 86401])
+def test_anomaly_rule_baseline_must_be_a_minute_to_a_day(seconds):
+    with pytest.raises(ValidationError):
+        AlertRuleIn(**anomaly_rule(baseline_seconds=seconds))
+
+
+def test_threshold_rule_rejects_a_baseline():
+    with pytest.raises(ValidationError, match="only applies to anomaly rules"):
+        AlertRuleIn(**valid_rule(baseline_seconds=600))
+
+
+def test_rejects_an_unknown_rule_kind():
+    with pytest.raises(ValidationError):
+        AlertRuleIn(**valid_rule(kind="forecast"))

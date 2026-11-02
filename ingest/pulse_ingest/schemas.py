@@ -2,13 +2,19 @@ from __future__ import annotations
 
 from typing import Literal
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 MAX_TAGS = 20
 MAX_TAG_LEN = 200
 MAX_RULE_DURATION_SECONDS = 86400
 
+# The same bounds as the baseline endpoint's `window` (pulse_ingest.anomaly).
+DEFAULT_BASELINE_SECONDS = 3600
+MIN_BASELINE_SECONDS = 60
+MAX_BASELINE_SECONDS = 86400
+
 Operator = Literal[">", ">=", "<", "<="]
+RuleKind = Literal["threshold", "anomaly"]
 
 
 def _reject_nul(value: str) -> str:
@@ -64,6 +70,12 @@ class MetricBatch(BaseModel):
 class AlertRuleIn(BaseModel):
     """An alert rule: `metric_name operator threshold` held for `duration_seconds`.
 
+    A `threshold` rule compares each sample's value with `threshold`. An
+    `anomaly` rule compares how many standard deviations each sample is from
+    the series' rolling baseline over the trailing `baseline_seconds`:
+    `>` with threshold 3 is "more than 3 sigma above", `<` with -3 "more than
+    3 sigma below".
+
     Mirrors the `alert_rules` table, except `host` is a hostname (None means
     fleet-wide) rather than a `hosts.id`.
     """
@@ -78,6 +90,9 @@ class AlertRuleIn(BaseModel):
     host: str | None = Field(default=None, min_length=1, max_length=255)
     tag_filter: dict[str, str | None] = Field(default_factory=dict)
     enabled: bool = True
+    kind: RuleKind = "threshold"
+    # Anomaly rules only; defaults to DEFAULT_BASELINE_SECONDS for them.
+    baseline_seconds: int | None = Field(default=None, ge=MIN_BASELINE_SECONDS, le=MAX_BASELINE_SECONDS)
 
     @field_validator("name", "metric_name", "host")
     @classmethod
@@ -100,3 +115,19 @@ class AlertRuleIn(BaseModel):
             if val is not None:
                 _reject_nul(val)
         return tags
+
+    @model_validator(mode="after")
+    def _check_kind(self) -> AlertRuleIn:
+        if self.kind == "threshold":
+            if self.baseline_seconds is not None:
+                raise ValueError("baseline_seconds only applies to anomaly rules")
+            return self
+        if self.baseline_seconds is None:
+            self.baseline_seconds = DEFAULT_BASELINE_SECONDS
+        # A deviation "above" is positive and "below" negative; the other way
+        # round ("> baseline - 2 sigma") is true nearly all the time.
+        if self.operator in (">", ">=") and self.threshold <= 0:
+            raise ValueError("an anomaly rule with > or >= needs a positive threshold (sigma above the baseline)")
+        if self.operator in ("<", "<=") and self.threshold >= 0:
+            raise ValueError("an anomaly rule with < or <= needs a negative threshold (sigma below the baseline)")
+        return self

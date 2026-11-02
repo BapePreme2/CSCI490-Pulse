@@ -246,3 +246,19 @@ screenshots caught what the unit tests couldn't: a tagged series like
 broke mid-word, so the series now gets its own full-width row, and on a
 phone every fact stacked in a single column until the cells were allowed
 to go down to 120px for two columns.
+
+## Task mapping (Week 9)
+
+| Task | File(s) |
+| --- | --- |
+| ANOM-02 anomaly rules in the UI | `src/components/RuleForm.tsx` (Type, Sigma, Baseline fields), `src/rules/form.ts` (sigma sign from the operator, validation), `src/rules/format.ts` (`describeCondition`), `src/alerts/format.ts` (`formatBaseline`), `src/routes/AlertsPage.tsx` (Baseline on anomaly alerts), `src/routes/RulesPage.tsx`, `src/api/types.ts` (`RuleKind`); API side in `ingest/` |
+
+The form shows the sigma as a positive number and lets the operator pick the
+side: `<` with 2.5 is sent as `threshold: -2.5`, and an existing rule's
+negative threshold comes back as 2.5 when edited. Switching Type resets the
+threshold, so a threshold rule's `80` doesn't turn into 80σ. Editing an
+anomaly rule sends `kind` and `baseline_seconds` back, so saving it can't
+quietly turn it into a threshold rule (which the form, written before rule
+kinds existed, would otherwise have done). Checked in headless Chromium
+against the real API: creating an anomaly rule from the form, the rule list,
+and an anomaly alert's card with its baseline.

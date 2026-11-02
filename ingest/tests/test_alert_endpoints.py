@@ -61,6 +61,10 @@ def test_alerts_lists_each_alert_with_its_times_and_outcome():
         "resolve_reason": "recovered",
         "last_value": 41.0,
         "last_evaluated_at": 1725.0,
+        "kind": "threshold",
+        "baseline_seconds": None,
+        "last_baseline_mean": None,
+        "last_baseline_stddev": None,
     }
     first = body["alerts"][0]
     assert (first["state"], first["rule_id"], first["resolved_at"], first["resolve_reason"]) == (

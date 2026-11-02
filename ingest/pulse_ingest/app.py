@@ -404,6 +404,8 @@ def _rule_dict(r: AlertRule) -> dict:
         "host": r.host,
         "tag_filter": r.tag_filter,
         "enabled": r.enabled,
+        "kind": r.kind,
+        "baseline_seconds": r.baseline_seconds,
         "created_at": r.created_at,
         "updated_at": r.updated_at,
     }
@@ -428,6 +430,10 @@ def _alert_dict(a: Alert) -> dict:
         "resolve_reason": a.resolve_reason,
         "last_value": a.last_value,
         "last_evaluated_at": a.last_evaluated_at,
+        "kind": a.kind,
+        "baseline_seconds": a.baseline_seconds,
+        "last_baseline_mean": a.last_baseline_mean,
+        "last_baseline_stddev": a.last_baseline_stddev,
     }
 
 
