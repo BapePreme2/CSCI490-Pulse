@@ -689,6 +689,66 @@ value recovered" explanation as the email). In Slack it reads like this:
   `fired_at` while still firing, which the dashboard computes so it keeps
   ticking between polls.
 
+## Anomaly baseline (ANOM-01)
+
+Threshold rules need someone to know what "too high" is. Anomaly detection
+instead asks whether a value is unusual *for that series*, which starts with
+a baseline of what's normal: a rolling mean and standard deviation per
+series (`rolling_baseline()` in `pulse_ingest/anomaly.py`).
+
+The baseline at a sample taken at time `t` is the mean and sample standard
+deviation (n - 1) of the same series' samples in `[t - window, t)`:
+
+- **The sample itself is left out.** Otherwise a spike would pull its own
+  baseline toward it and hide part of how far it deviates. It does count
+  toward every baseline after it, for as long as it's in their window.
+- **No baseline until the window holds 30 samples** (`MIN_BASELINE_SAMPLES`,
+  five minutes at the agent's default 10s interval). `mean` and `stddev` are
+  `null` until then, because a standard deviation of three samples says
+  nothing about what's normal. That applies at a host's first report and
+  again after any gap longer than the window, since the window is then empty.
+- **Each series on its own,** like rules: every core, mount, and interface
+  gets its own baseline.
+- **One pass, numerically steady.** Each sample enters and leaves the window
+  once, keeping a running mean and sum of squared deviations (Welford's
+  method, with removal). Keeping `sum(x)` and `sum(x²)` would be simpler but
+  cancels badly on large steady values like memory in MB.
+  `tests/test_anomaly.py` checks the result against recomputing each window
+  from scratch, including on values around 10⁹. A constant series gets a
+  standard deviation of exactly 0.
+
+**`GET /hosts/{host}/metrics/{name}/baseline`** returns each sample in the
+range with its baseline, one series per tag set like the history endpoint.
+No API key, like the other dashboard endpoints.
+
+```bash
+curl "http://127.0.0.1:8000/hosts/web-1/metrics/cpu.usage/baseline?window=3600"
+```
+
+```json
+{
+  "host": "web-1", "name": "cpu.usage", "start": 1789415442, "end": 1789419042,
+  "window_seconds": 3600, "min_samples": 30,
+  "series": [
+    {"unit": "percent", "tags": {"core": "0"}, "points": [
+      {"timestamp": 1789419042.0, "value": 91.5, "samples": 360, "mean": 22.4, "stddev": 6.1}
+    ]}
+  ]
+}
+```
+
+- `start`/`end` work the same as in the history endpoint (last hour by
+  default, at most 30 days, `400` otherwise).
+- `window` is in seconds, 60-86400 (default 3600), `422` outside that. The
+  query reaches one window before `start`, so the first sample in the range
+  already has a full window behind it.
+- `404` for an unknown host, `503` if the database is unreachable. A series
+  with samples only before `start` is left out.
+
+This is the groundwork for an anomaly rule type (ANOM-02: alert when a value
+is more than N standard deviations from its baseline) and for anomaly
+markers on the dashboard's charts (DASH-10).
+
 ## Smoke test (OPS-02)
 
 One command that checks the whole pipeline end to end, for before a demo or
@@ -804,3 +864,9 @@ half-applied. To add one, create the next numbered file, e.g.
 | DASH-09 alert history (API side) | `pulse_ingest/store.py` (`list_alerts`, `AlertHistory`), `pulse_ingest/app.py` (`GET /alerts`), `tests/test_alert_store.py`, `tests/test_alert_endpoints.py`, `tests/fakes.py`; page in `dashboard/` |
 | OPS-02 end-to-end smoke test | `pulse_ingest/smoke.py` (also hosts the SMTP/webhook stand-ins the tests use), `scripts/smoke-test.sh`, `tests/test_smoke.py`, `tests/conftest.py` |
 | OPS-03 restart catch-up (found against a test fleet) | `pulse_ingest/alerts.py` (`CATCH_UP_SECONDS`, `RuleEvaluator` catching-up flag, `plan_transitions(hold_rule_ids=)`, `AlertTracker`), `pulse_ingest/store.py` (`enabled_rule_ids`), `tests/test_alerts.py`, `tests/test_alert_store.py`; the rest of OPS-03 is in `agent/`, `scripts/test-fleet.sh`, and `docs/ops-03-stability-run.md` |
+
+## Task mapping (Week 9)
+
+| Task | File(s) |
+| --- | --- |
+| ANOM-01 rolling mean / std-dev baseline per series | `pulse_ingest/anomaly.py` (`rolling_baseline`), `pulse_ingest/app.py` (`GET /hosts/{host}/metrics/{name}/baseline`, `_time_range`), `tests/test_anomaly.py`, `tests/test_dashboard_endpoints.py`, `tests/fakes.py` |

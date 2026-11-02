@@ -25,6 +25,8 @@ class FakeStore:
         self._alert_history = alert_history or AlertHistory(alerts=[], has_more=False, firing_count=0)
         # The (host, state, limit) of each list_alerts call.
         self.alert_queries = []
+        # The (host, name, start, end) of each get_history call.
+        self.history_queries = []
 
     def write_batch(self, batch):
         if self.error:
@@ -57,6 +59,7 @@ class FakeStore:
     def get_history(self, host, name, start, end):
         if self.error:
             raise self.error
+        self.history_queries.append((host, name, start, end))
         return self._hosts.get(host, {}).get("history", {}).get(name, [])
 
     def list_alerts(self, host, state, limit):

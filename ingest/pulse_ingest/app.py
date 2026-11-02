@@ -15,6 +15,14 @@ from psycopg_pool import PoolTimeout
 
 from pulse_ingest import __version__
 from pulse_ingest.alerts import DEFAULT_INTERVAL_SECONDS, AlertTracker, RuleEvaluator
+from pulse_ingest.anomaly import (
+    DEFAULT_WINDOW_SECONDS,
+    MAX_WINDOW_SECONDS,
+    MIN_BASELINE_SAMPLES,
+    MIN_WINDOW_SECONDS,
+    BaselinePoint,
+    rolling_baseline,
+)
 from pulse_ingest.auth import extract_bearer_token, is_valid_key, load_api_keys
 from pulse_ingest.migrate import database_url
 from pulse_ingest.notify import SLACK_ENV_VAR, Channel, EmailChannel, EmailConfig, Notifier, SlackChannel, SlackConfig
@@ -211,16 +219,7 @@ def create_app(
         if not known:
             raise HTTPException(status.HTTP_404_NOT_FOUND, detail=f"Unknown host: {host}")
 
-        end = end if end is not None else time.time()
-        start = start if start is not None else end - DEFAULT_HISTORY_RANGE_SECONDS
-        if start >= end:
-            raise HTTPException(status.HTTP_400_BAD_REQUEST, detail="start must be before end")
-        if end - start > MAX_HISTORY_RANGE_SECONDS:
-            raise HTTPException(
-                status.HTTP_400_BAD_REQUEST,
-                detail=f"range cannot exceed {MAX_HISTORY_RANGE_SECONDS} seconds",
-            )
-
+        start, end = _time_range(start, end)
         try:
             series = store.get_history(host, name, start, end)
         except (psycopg.OperationalError, PoolTimeout):
@@ -238,6 +237,50 @@ def create_app(
                 }
                 for s in series
             ],
+        }
+
+    @app.get("/hosts/{host}/metrics/{name}/baseline")
+    def metric_baseline(
+        host: str,
+        name: str,
+        start: float | None = Query(None, description="Unix epoch seconds; defaults to end - 1h"),
+        end: float | None = Query(None, description="Unix epoch seconds; defaults to now"),
+        window: int = Query(
+            DEFAULT_WINDOW_SECONDS,
+            ge=MIN_WINDOW_SECONDS,
+            le=MAX_WINDOW_SECONDS,
+            description="Seconds of trailing samples each baseline covers",
+        ),
+    ) -> dict:
+        try:
+            known = store.host_exists(host)
+        except (psycopg.OperationalError, PoolTimeout):
+            raise _database_unavailable()
+        if not known:
+            raise HTTPException(status.HTTP_404_NOT_FOUND, detail=f"Unknown host: {host}")
+
+        start, end = _time_range(start, end)
+        # Reach one window further back, so the first sample in the range
+        # already has a full window behind it.
+        try:
+            series = store.get_history(host, name, start - window, end)
+        except (psycopg.OperationalError, PoolTimeout):
+            raise _database_unavailable()
+
+        result = []
+        for s in series:
+            points = rolling_baseline(s.points, window, start=start)
+            # A series that only reported before the range has nothing in it.
+            if points:
+                result.append({"unit": s.unit, "tags": s.tags, "points": [_baseline_dict(p) for p in points]})
+        return {
+            "host": host,
+            "name": name,
+            "start": start,
+            "end": end,
+            "window_seconds": window,
+            "min_samples": MIN_BASELINE_SAMPLES,
+            "series": result,
         }
 
     # --- alert rules (ALERT-05). Like the read endpoints, these need no API
@@ -315,6 +358,24 @@ def create_app(
         }
 
     return app
+
+
+def _time_range(start: float | None, end: float | None) -> tuple[float, float]:
+    """A read endpoint's [start, end]: the last hour by default, at most 30 days."""
+    end = end if end is not None else time.time()
+    start = start if start is not None else end - DEFAULT_HISTORY_RANGE_SECONDS
+    if start >= end:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, detail="start must be before end")
+    if end - start > MAX_HISTORY_RANGE_SECONDS:
+        raise HTTPException(
+            status.HTTP_400_BAD_REQUEST,
+            detail=f"range cannot exceed {MAX_HISTORY_RANGE_SECONDS} seconds",
+        )
+    return start, end
+
+
+def _baseline_dict(p: BaselinePoint) -> dict:
+    return {"timestamp": p.timestamp, "value": p.value, "samples": p.samples, "mean": p.mean, "stddev": p.stddev}
 
 
 def _rule_not_found(rule_id: int) -> HTTPException:
