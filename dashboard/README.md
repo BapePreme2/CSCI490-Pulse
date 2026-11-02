@@ -77,7 +77,19 @@ npm run build
   `src/metrics/series.ts#toChartSeries` (which turns each series' tags into
   its line's label, e.g. `{core: "0"}` -> `"core 0"`; pass a relevant-key
   allowlist, e.g. `["core"]`, so an agent's other configured tags don't
-  clutter every label).
+  clutter every label). A series can also carry `markers`: points drawn as
+  dots in the series' color on top of every line, each with a hover
+  tooltip, and named once in the legend (`markerLabel`).
+- `src/metrics/anomalies.ts` + `src/components/AnomalyList.tsx` -- the CPU
+  chart's anomaly markers (DASH-10), from
+  `GET /hosts/{host}/metrics/cpu.usage/anomalies` over the chart's range.
+  `toChartSeriesWithAnomalies` matches each anomalous run to its line by
+  tag set and marks only samples that line actually has, so a marker always
+  sits on its line. `AnomalyList` lists them under the chart as events,
+  newest first (the 8 most recent): runs that overlap in time are one
+  event, so a spike on every core is one entry, not nine. Each says when,
+  which series, how many samples, and the sample furthest off, e.g.
+  `furthest off: core 3 at 36.6%, +33.5σ from 0.826 ± 1.07%`.
 - `src/components/TimeRangeSelector.tsx` + `src/metrics/timeRanges.ts` -- the
   1h/6h/24h/7d buttons above the chart. Selecting one re-fetches the chart's
   history with a new `start`/`end` window; it does not affect the tiles'
@@ -252,6 +264,20 @@ to go down to 120px for two columns.
 | Task | File(s) |
 | --- | --- |
 | ANOM-02 anomaly rules in the UI | `src/components/RuleForm.tsx` (Type, Sigma, Baseline fields), `src/rules/form.ts` (sigma sign from the operator, validation), `src/rules/format.ts` (`describeCondition`), `src/alerts/format.ts` (`formatBaseline`), `src/routes/AlertsPage.tsx` (Baseline on anomaly alerts), `src/routes/RulesPage.tsx`, `src/api/types.ts` (`RuleKind`); API side in `ingest/` |
+| DASH-10 anomaly markers on the history chart | `src/components/LineChart.tsx` (`markers`, `markerLabel`), `src/metrics/anomalies.ts`, `src/components/AnomalyList.tsx`, `src/routes/HostPage.tsx` (`ANOMALY_SIGMA`, `ANOMALY_WINDOW_SECONDS`), `src/api/client.ts` (`fetchMetricAnomalies`), `src/api/types.ts` (`AnomaliesResponse`), `src/index.css` (`.line-chart-marker*`, `.anomaly-notes*`); API side in `ingest/` |
+
+The CPU chart marks every sample that was 3σ or more from its baseline, the
+hour before it: the defaults of a new anomaly rule, and the API does the
+math, so a marker means the same thing an anomaly rule's σ does. Markers
+are extra detail, fetched separately from the chart's history: if they
+can't be fetched, the chart still shows with a note that they're missing.
+A marker is a dot in its line's color with a 2px ring in the card's color,
+so it stays readable where other cores' lines cross it, and its tooltip
+reads `core 3, 05:30:42 AM: 36.6%, +33.5σ from 0.826 ± 1.07%`. Grouping
+the list into events came from running it: a CPU spike on an 8-core host
+made 9 runs whose start times differ by microseconds (each series is
+timestamped as it's collected), so the list showed the same spike 8 times
+and the 8-entry limit cut off "overall".
 
 The form shows the sigma as a positive number and lets the operator pick the
 side: `<` with 2.5 is sent as `threshold: -2.5`, and an existing rule's

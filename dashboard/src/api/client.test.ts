@@ -9,6 +9,7 @@ import {
   fetchHostSummary,
   fetchHosts,
   fetchLatestMetrics,
+  fetchMetricAnomalies,
   fetchMetricHistory,
   fetchRules,
   updateRule,
@@ -64,6 +65,35 @@ describe("fetchLatestMetrics", () => {
     vi.stubGlobal("fetch", vi.fn().mockRejectedValue(new TypeError("network down")));
 
     await expect(fetchLatestMetrics("web-1")).rejects.toThrow(ApiError);
+  });
+});
+
+describe("fetchMetricAnomalies", () => {
+  const empty = { host: "web-1", name: "cpu.usage", start: 0, end: 0, window_seconds: 3600, min_samples: 30, sigma: 3, series: [] };
+
+  it("asks for the range, window and sigma given", async () => {
+    const fetchMock = mockFetch({ json: async () => empty });
+
+    const response = await fetchMetricAnomalies("web 1", "cpu.usage", 100, 200, { window: 600, sigma: 2.5 });
+
+    expect(response).toEqual(empty);
+    expect(fetchMock).toHaveBeenCalledWith(
+      "http://localhost:8000/hosts/web%201/metrics/cpu.usage/anomalies?start=100&end=200&window=600&sigma=2.5",
+    );
+  });
+
+  it("leaves the API's defaults alone when nothing is given", async () => {
+    const fetchMock = mockFetch({ json: async () => empty });
+
+    await fetchMetricAnomalies("web-1", "cpu.usage");
+
+    expect(fetchMock).toHaveBeenCalledWith("http://localhost:8000/hosts/web-1/metrics/cpu.usage/anomalies");
+  });
+
+  it("throws HostNotFoundError for an unknown host", async () => {
+    mockFetch({ ok: false, status: 404 });
+
+    await expect(fetchMetricAnomalies("nope", "cpu.usage")).rejects.toBeInstanceOf(HostNotFoundError);
   });
 });
 

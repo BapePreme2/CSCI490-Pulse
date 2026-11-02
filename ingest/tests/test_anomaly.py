@@ -5,7 +5,14 @@ import statistics
 import pytest
 from fastapi.testclient import TestClient
 
-from pulse_ingest.anomaly import MIN_BASELINE_SAMPLES, baseline, deviation, rolling_baseline, spread
+from pulse_ingest.anomaly import (
+    MIN_BASELINE_SAMPLES,
+    baseline,
+    deviation,
+    find_anomalies,
+    rolling_baseline,
+    spread,
+)
 from pulse_ingest.app import create_app
 from pulse_ingest.migrate import apply_migrations
 from pulse_ingest.schemas import MetricBatch
@@ -235,3 +242,105 @@ def test_deviation_from_a_constant_zero_baseline():
     assert deviation(0.0, 0.0, 0.0) == 0.0
     assert deviation(0.5, 0.0, 0.0) == math.inf
     assert deviation(-0.5, 0.0, 0.0) == -math.inf
+
+
+# --- find_anomalies (dashboard markers, DASH-10) ---
+
+
+def flagged(values, sigma=3.0, min_samples=MIN_BASELINE_SAMPLES):
+    """The runs found in a 10s series, each as (direction, [values])."""
+    points = rolling_baseline(series(*values), window_seconds=3600, min_samples=min_samples)
+    return [(a.direction, [p.value for p in a.points]) for a in find_anomalies(points, sigma)]
+
+
+STEADY = [48.0, 52.0] * 20  # mean 50, stddev ~2.03
+
+
+def test_nothing_is_flagged_in_a_steady_series():
+    assert flagged(STEADY * 2) == []
+
+
+def test_a_spike_is_one_run_above():
+    assert flagged([*STEADY, 90.0, 50.0]) == [("above", [90.0])]
+
+
+def test_a_dip_is_a_run_below():
+    assert flagged([*STEADY, 10.0, 50.0]) == [("below", [10.0])]
+
+
+def test_consecutive_flagged_samples_are_one_run():
+    assert flagged([*STEADY, 90.0, 95.0, 92.0, 50.0]) == [("above", [90.0, 95.0, 92.0])]
+
+
+def test_a_sample_back_within_sigma_ends_the_run():
+    runs = flagged([*STEADY, 90.0, 50.0, 90.0])
+
+    assert runs == [("above", [90.0]), ("above", [90.0])]
+
+
+def test_a_flip_to_the_other_side_starts_a_new_run():
+    assert flagged([*STEADY, 90.0, 0.0]) == [("above", [90.0]), ("below", [0.0])]
+
+
+def test_exactly_sigma_away_is_flagged():
+    # A constant baseline of 50 has a spread of 0.5 (1% of the mean), so 51.5
+    # is exactly 3 sigma above it.
+    assert flagged([50.0] * 30 + [51.5]) == [("above", [51.5])]
+    assert flagged([50.0] * 30 + [51.4]) == []
+
+
+def test_samples_without_a_baseline_are_never_flagged():
+    assert flagged([50.0] * 29 + [1000.0]) == []
+
+
+def test_a_lasting_change_stops_being_flagged_once_the_baseline_catches_up():
+    # Each sample is judged against the hour before it, so a jump that stays
+    # pulls its own baseline up behind it: after a steady hour, within about
+    # window / sigma^2 = 400s at 3 sigma.
+    ((direction, values),) = flagged([*STEADY * 9, *[90.0] * 100])
+
+    assert direction == "above"
+    assert 18 <= len(values) <= 48  # 3-8 minutes of 10s samples
+
+
+def test_anomalous_points_carry_their_baseline_and_deviation():
+    points = rolling_baseline(series(*STEADY, 90.0), window_seconds=3600)
+
+    ((anomaly,),) = [find_anomalies(points)]
+    (p,) = anomaly.points
+
+    assert (anomaly.start, anomaly.end) == (400.0, 400.0)
+    assert p.mean == pytest.approx(50.0)
+    assert p.spread == pytest.approx(statistics.stdev(STEADY))
+    assert p.deviation == pytest.approx(40.0 / statistics.stdev(STEADY))
+
+
+def test_spread_is_floored_like_anomaly_rules():
+    points = rolling_baseline(series(*[50.0] * 30, 52.0), window_seconds=3600)
+
+    (anomaly,) = find_anomalies(points)
+
+    assert anomaly.points[0].spread == pytest.approx(0.5)
+    assert anomaly.points[0].deviation == pytest.approx(4.0)
+
+
+def test_any_change_from_a_constant_zero_baseline_is_infinitely_far():
+    points = rolling_baseline(series(*[0.0] * 30, 2.0, 0.0), window_seconds=3600)
+
+    (anomaly,) = find_anomalies(points)
+
+    assert anomaly.direction == "above"
+    assert anomaly.points[0].deviation == math.inf
+
+
+def test_a_lower_sigma_flags_more():
+    values = [*STEADY, 58.0, 50.0]
+
+    assert flagged(values, sigma=3.0) == [("above", [58.0])]
+    assert flagged(values, sigma=4.0) == []
+
+
+@pytest.mark.parametrize("sigma", [0, -1, 101])
+def test_rejects_a_sigma_out_of_bounds(sigma):
+    with pytest.raises(ValueError):
+        find_anomalies([], sigma)

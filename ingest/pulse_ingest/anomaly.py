@@ -14,6 +14,7 @@ import math
 from collections import deque
 from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
+from typing import Literal
 
 from pulse_ingest.schemas import DEFAULT_BASELINE_SECONDS, MAX_BASELINE_SECONDS, MIN_BASELINE_SECONDS
 from pulse_ingest.store import HistoryPoint
@@ -31,6 +32,13 @@ MIN_BASELINE_SAMPLES = 30
 # deviation at or near zero, so any wobble at all would be "many sigma" away.
 # Deviations are measured in at least this fraction of the baseline mean.
 MIN_RELATIVE_SPREAD = 0.01
+
+# The dashboard's anomaly markers (DASH-10) flag samples at least this many
+# sigma from their baseline: the same default as a new anomaly rule.
+DEFAULT_SIGMA = 3.0
+MAX_SIGMA = 100.0
+
+Direction = Literal["above", "below"]
 
 
 @dataclass(frozen=True)
@@ -165,3 +173,70 @@ def deviation(value: float, mean: float, stddev: float) -> float:
     if s == 0:
         return 0.0 if diff == 0 else math.copysign(math.inf, diff)
     return diff / s
+
+
+@dataclass(frozen=True)
+class AnomalousPoint:
+    """One sample at least N sigma from its baseline. `spread` is what the
+    deviation was measured in (see `spread`); `deviation` is +/-inf against a
+    baseline that was constantly 0."""
+
+    timestamp: float
+    value: float
+    mean: float
+    spread: float
+    deviation: float
+
+
+@dataclass(frozen=True)
+class Anomaly:
+    """A run of one series' consecutive samples, each at least N sigma from
+    its own baseline, all in the same direction."""
+
+    direction: Direction
+    points: tuple[AnomalousPoint, ...]
+
+    @property
+    def start(self) -> float:
+        return self.points[0].timestamp
+
+    @property
+    def end(self) -> float:
+        return self.points[-1].timestamp
+
+
+def find_anomalies(points: Iterable[BaselinePoint], sigma: float = DEFAULT_SIGMA) -> list[Anomaly]:
+    """The runs of samples in one series' `rolling_baseline` that are at
+    least `sigma` from their baseline, oldest first.
+
+    Each sample is judged against its own rolling baseline, so the verdict on
+    a sample depends only on the window before it, never on which range is
+    on screen. A lasting change is flagged until it has pulled the baseline
+    up behind it (roughly window / sigma^2: about 7 minutes at 3 sigma over an
+    hour). An anomaly rule's open alert keeps the baseline it opened with
+    instead, so it stays firing. A run ends at a sample that's within sigma,
+    past it in the other direction, or has no baseline yet.
+    """
+    if not 0 < sigma <= MAX_SIGMA:
+        raise ValueError(f"sigma must be more than 0 and at most {MAX_SIGMA:g}")
+
+    runs: list[Anomaly] = []
+    run: list[AnomalousPoint] = []
+    run_direction: Direction = "above"
+    for p in points:
+        flagged: Direction | None = None
+        if p.mean is not None and p.stddev is not None:
+            d = deviation(p.value, p.mean, p.stddev)
+            if d >= sigma:
+                flagged = "above"
+            elif d <= -sigma:
+                flagged = "below"
+        if run and flagged != run_direction:
+            runs.append(Anomaly(run_direction, tuple(run)))
+            run = []
+        if flagged is not None:
+            run_direction = flagged
+            run.append(AnomalousPoint(p.timestamp, p.value, p.mean, spread(p.mean, p.stddev), d))
+    if run:
+        runs.append(Anomaly(run_direction, tuple(run)))
+    return runs

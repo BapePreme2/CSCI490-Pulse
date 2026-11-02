@@ -747,8 +747,8 @@ curl "http://127.0.0.1:8000/hosts/web-1/metrics/cpu.usage/baseline?window=3600"
 - `404` for an unknown host, `503` if the database is unreachable. A series
   with samples only before `start` is left out.
 
-Anomaly rules (below) use the same baseline, and the dashboard's anomaly
-markers will too (DASH-10).
+Anomaly rules (below) and the dashboard's anomaly markers (DASH-10, further
+below) use the same baseline.
 
 ## Anomaly rules (ANOM-02)
 
@@ -828,6 +828,64 @@ anomaly rule with a 1h baseline reads about 400 samples per series every 10
 seconds. That's fine at this project's scale; at 24h it's about 8,700, and a
 fleet-wide rule on a per-core metric multiplies that by every core of every
 host.
+
+## Anomaly markers (DASH-10)
+
+The dashboard marks unusual samples on its history charts. Which ones is
+decided here, with the same baseline, spread floor, and deviation as anomaly
+rules (`find_anomalies()` in `pulse_ingest/anomaly.py`), so a marker and a
+rule's σ mean the same thing.
+
+**`GET /hosts/{host}/metrics/{name}/anomalies`** returns, per series, each
+run of consecutive samples at least `sigma` from their rolling baseline, in
+the same direction:
+
+```bash
+curl "http://127.0.0.1:8000/hosts/live-host/metrics/cpu.usage/anomalies?start=1793626240&end=1793626245"
+```
+
+A real response (one core, numbers rounded) from a run with the agent at a
+1s interval and every core busy-looped for 15 seconds:
+
+```json
+{
+  "host": "live-host", "name": "cpu.usage", "start": 1793626240, "end": 1793626245,
+  "window_seconds": 3600, "min_samples": 30, "sigma": 3.0,
+  "series": [
+    {"unit": "percent", "tags": {"core": "1", "environment": "demo"}, "anomalies": [
+      {"start": 1793626242.1, "end": 1793626244.1, "direction": "above", "points": [
+        {"timestamp": 1793626242.1, "value": 36.3, "mean": 1.15, "spread": 2.73, "deviation": 12.9},
+        {"timestamp": 1793626243.1, "value": 100.0, "mean": 1.53, "spread": 4.57, "deviation": 21.53},
+        {"timestamp": 1793626244.1, "value": 100.0, "mean": 2.6, "spread": 11.23, "deviation": 8.67}
+      ]}
+    ]}
+  ]
+}
+```
+
+Each sample's `spread` grows as the spike enters the baselines after it.
+The host had only about 90 seconds of history, so after 11 samples the
+spike had pulled its own baseline up enough to stop counting, 4 seconds
+before the load stopped.
+
+- `start`, `end`, and `window` work as in the baseline endpoint. `sigma` is
+  more than 0 and at most 100 (default 3, a new anomaly rule's default),
+  `422` otherwise.
+- **Both directions.** A run is `above` or `below`; a sample past `sigma`
+  the other way starts a new run. (A rule picks one side with its
+  operator.)
+- **Each sample against its own rolling baseline**, the window before it.
+  The verdict on a sample never depends on which range is on screen. A
+  lasting change is marked until it has pulled the baseline up behind it
+  (36 samples, 6 minutes, for a jump after a steady hour at 3σ in
+  `tests/test_anomaly.py`). That's the difference from a rule's open alert,
+  which keeps its opening baseline and stays firing.
+- `spread` is what the deviation was measured in (the baseline's standard
+  deviation, at least 1% of its mean). `deviation` is `null` against a
+  baseline that was constantly 0, where any change is infinitely far off
+  (JSON has no infinity); `direction` still says which way.
+- Only series with at least one run are listed. A sample with no baseline
+  yet (fewer than 30 samples in its window) is never marked.
 
 ## Smoke test (OPS-02)
 
@@ -951,3 +1009,4 @@ half-applied. To add one, create the next numbered file, e.g.
 | --- | --- |
 | ANOM-01 rolling mean / std-dev baseline per series | `pulse_ingest/anomaly.py` (`rolling_baseline`), `pulse_ingest/app.py` (`GET /hosts/{host}/metrics/{name}/baseline`, `_time_range`), `tests/test_anomaly.py`, `tests/test_dashboard_endpoints.py`, `tests/fakes.py` |
 | ANOM-02 anomaly rule type | `migrations/005_anomaly_rules.sql`, `pulse_ingest/schemas.py` (`kind`, `baseline_seconds`), `pulse_ingest/anomaly.py` (`baseline`, `spread`, `deviation`), `pulse_ingest/alerts.py` (`_evaluate`, `Evaluation.against`, `plan_transitions`), `pulse_ingest/store.py`, `pulse_ingest/notify.py` (`_condition`, `_baseline_details`), `pulse_ingest/app.py`, `tests/test_alerts.py`, `tests/test_anomaly.py`, `tests/test_schemas.py`, `tests/test_migrate.py`, `tests/test_alert_queries.py`, `tests/test_alert_store.py`, `tests/test_rule_store.py`, `tests/test_rule_endpoints.py`, `tests/test_notify.py`; UI in `dashboard/` |
+| DASH-10 anomaly markers (API side) | `pulse_ingest/anomaly.py` (`find_anomalies`, `Anomaly`, `DEFAULT_SIGMA`), `pulse_ingest/app.py` (`GET /hosts/{host}/metrics/{name}/anomalies`, `_baselines`, `_anomaly_dict`), `tests/test_anomaly.py`, `tests/test_dashboard_endpoints.py`; UI in `dashboard/` |

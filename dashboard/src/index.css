@@ -288,6 +288,72 @@ h1 {
   border-radius: 2px;
 }
 
+/* Anomaly markers (DASH-10): a dot in the series' color, ringed in the
+   surface color so it stays readable where lines cross it. */
+.line-chart-marker-dot {
+  stroke: var(--color-surface);
+  stroke-width: 2px;
+}
+
+.line-chart-marker-target {
+  fill: transparent;
+}
+
+.line-chart-marker:hover .line-chart-marker-dot {
+  stroke: var(--color-text);
+}
+
+.line-chart-legend-marker {
+  display: inline-block;
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  background: var(--color-muted);
+}
+
+.anomaly-notes {
+  max-width: 600px;
+  margin-top: var(--space-3);
+  font-size: 0.85rem;
+  color: var(--color-muted);
+}
+
+.anomaly-notes p {
+  margin: 0;
+}
+
+.anomaly-notes-list {
+  margin: var(--space-2) 0 0;
+  padding: 0;
+  list-style: none;
+}
+
+.anomaly-notes-list li {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0 var(--space-2);
+  padding: var(--space-1) 0;
+  border-top: 1px solid var(--color-border);
+}
+
+.anomaly-notes-series {
+  font-weight: 600;
+  color: var(--color-text);
+}
+
+.anomaly-notes-when {
+  font-variant-numeric: tabular-nums;
+  color: var(--color-text);
+}
+
+.anomaly-notes .anomaly-notes-more {
+  margin-top: var(--space-1);
+}
+
+.anomaly-notes-unavailable {
+  margin-top: var(--space-3);
+}
+
 .fleet-table {
   width: 100%;
   border-collapse: collapse;

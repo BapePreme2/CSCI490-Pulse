@@ -4,6 +4,7 @@ import type {
   AlertRuleInput,
   AlertRulesResponse,
   AlertState,
+  AnomaliesResponse,
   FleetHost,
   FleetHostsResponse,
   HistoryResponse,
@@ -108,6 +109,34 @@ export async function fetchMetricHistory(
 
   return getJson<HistoryResponse>(
     `/hosts/${encodeURIComponent(host)}/metrics/${encodeURIComponent(name)}${query}`,
+    host,
+  );
+}
+
+export interface AnomalyOptions {
+  /** Seconds of trailing samples each baseline covers (the API's default is 1h). */
+  window?: number;
+  /** Flag samples at least this many standard deviations off (default 3). */
+  sigma?: number;
+}
+
+/** The runs of samples at least `sigma` from their rolling baseline (DASH-10). */
+export async function fetchMetricAnomalies(
+  host: string,
+  name: string,
+  start?: number,
+  end?: number,
+  { window, sigma }: AnomalyOptions = {},
+): Promise<AnomaliesResponse> {
+  const params = new URLSearchParams();
+  if (start !== undefined) params.set("start", String(start));
+  if (end !== undefined) params.set("end", String(end));
+  if (window !== undefined) params.set("window", String(window));
+  if (sigma !== undefined) params.set("sigma", String(sigma));
+  const query = params.toString() ? `?${params.toString()}` : "";
+
+  return getJson<AnomaliesResponse>(
+    `/hosts/${encodeURIComponent(host)}/metrics/${encodeURIComponent(name)}/anomalies${query}`,
     host,
   );
 }

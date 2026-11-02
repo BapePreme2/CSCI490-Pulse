@@ -128,3 +128,44 @@ export interface AlertHistoryResponse {
   /** Alerts firing now on the requested host(s), regardless of the state filter. */
   firing_count: number;
 }
+
+export type AnomalyDirection = "above" | "below";
+
+/** One sample at least `sigma` from its rolling baseline. `spread` is the
+ * standard deviation the deviation was measured in (at least 1% of the
+ * mean). `deviation` is null against a baseline that was constantly 0: any
+ * change from it is infinitely far off, in the run's direction. */
+export interface AnomalyPoint {
+  timestamp: number;
+  value: number;
+  mean: number;
+  spread: number;
+  deviation: number | null;
+}
+
+/** A run of one series' consecutive samples, all anomalous in one direction. */
+export interface Anomaly {
+  start: number;
+  end: number;
+  direction: AnomalyDirection;
+  points: AnomalyPoint[];
+}
+
+export interface AnomalySeries {
+  unit: string;
+  tags: Record<string, string>;
+  anomalies: Anomaly[];
+}
+
+/** GET /hosts/{host}/metrics/{name}/anomalies. Only series with at least one
+ * anomaly are listed. */
+export interface AnomaliesResponse {
+  host: string;
+  name: string;
+  start: number;
+  end: number;
+  window_seconds: number;
+  min_samples: number;
+  sigma: number;
+  series: AnomalySeries[];
+}

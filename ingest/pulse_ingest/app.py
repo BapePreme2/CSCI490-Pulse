@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import math
 import os
 import time
 from collections.abc import Iterable
@@ -16,18 +17,30 @@ from psycopg_pool import PoolTimeout
 from pulse_ingest import __version__
 from pulse_ingest.alerts import DEFAULT_INTERVAL_SECONDS, AlertTracker, RuleEvaluator
 from pulse_ingest.anomaly import (
+    DEFAULT_SIGMA,
     DEFAULT_WINDOW_SECONDS,
+    MAX_SIGMA,
     MAX_WINDOW_SECONDS,
     MIN_BASELINE_SAMPLES,
     MIN_WINDOW_SECONDS,
+    Anomaly,
     BaselinePoint,
+    find_anomalies,
     rolling_baseline,
 )
 from pulse_ingest.auth import extract_bearer_token, is_valid_key, load_api_keys
 from pulse_ingest.migrate import database_url
 from pulse_ingest.notify import SLACK_ENV_VAR, Channel, EmailChannel, EmailConfig, Notifier, SlackChannel, SlackConfig
 from pulse_ingest.schemas import AlertRuleIn, MetricBatch
-from pulse_ingest.store import Alert, AlertRule, HostSummary, PostgresMetricStore, Store, UnknownHostError
+from pulse_ingest.store import (
+    Alert,
+    AlertRule,
+    HistorySeries,
+    HostSummary,
+    PostgresMetricStore,
+    Store,
+    UnknownHostError,
+)
 
 # uvicorn configures only its own loggers (uvicorn/uvicorn.access/uvicorn.error);
 # the root logger otherwise has no handler and a default level of WARNING, so
@@ -252,6 +265,65 @@ def create_app(
             description="Seconds of trailing samples each baseline covers",
         ),
     ) -> dict:
+        start, end, baselines = _baselines(host, name, start, end, window)
+        return {
+            "host": host,
+            "name": name,
+            "start": start,
+            "end": end,
+            "window_seconds": window,
+            "min_samples": MIN_BASELINE_SAMPLES,
+            "series": [
+                {"unit": s.unit, "tags": s.tags, "points": [_baseline_dict(p) for p in points]}
+                for s, points in baselines
+            ],
+        }
+
+    # --- anomaly markers (DASH-10): the runs of samples at least `sigma`
+    # from their own baseline, for the dashboard to mark on its charts.
+
+    @app.get("/hosts/{host}/metrics/{name}/anomalies")
+    def metric_anomalies(
+        host: str,
+        name: str,
+        start: float | None = Query(None, description="Unix epoch seconds; defaults to end - 1h"),
+        end: float | None = Query(None, description="Unix epoch seconds; defaults to now"),
+        window: int = Query(
+            DEFAULT_WINDOW_SECONDS,
+            ge=MIN_WINDOW_SECONDS,
+            le=MAX_WINDOW_SECONDS,
+            description="Seconds of trailing samples each baseline covers",
+        ),
+        sigma: float = Query(
+            DEFAULT_SIGMA,
+            gt=0,
+            le=MAX_SIGMA,
+            description="Flag samples at least this many standard deviations from their baseline",
+        ),
+    ) -> dict:
+        start, end, baselines = _baselines(host, name, start, end, window)
+        result = []
+        for s, points in baselines:
+            anomalies = find_anomalies(points, sigma)
+            if anomalies:
+                result.append({"unit": s.unit, "tags": s.tags, "anomalies": [_anomaly_dict(a) for a in anomalies]})
+        return {
+            "host": host,
+            "name": name,
+            "start": start,
+            "end": end,
+            "window_seconds": window,
+            "min_samples": MIN_BASELINE_SAMPLES,
+            "sigma": sigma,
+            "series": result,
+        }
+
+    def _baselines(
+        host: str, name: str, start: float | None, end: float | None, window: int
+    ) -> tuple[float, float, list[tuple[HistorySeries, list[BaselinePoint]]]]:
+        """The range, and each series' samples in it with their rolling
+        baselines. 404 for an unknown host; a series that only reported
+        before the range is left out."""
         try:
             known = store.host_exists(host)
         except (psycopg.OperationalError, PoolTimeout):
@@ -270,18 +342,9 @@ def create_app(
         result = []
         for s in series:
             points = rolling_baseline(s.points, window, start=start)
-            # A series that only reported before the range has nothing in it.
             if points:
-                result.append({"unit": s.unit, "tags": s.tags, "points": [_baseline_dict(p) for p in points]})
-        return {
-            "host": host,
-            "name": name,
-            "start": start,
-            "end": end,
-            "window_seconds": window,
-            "min_samples": MIN_BASELINE_SAMPLES,
-            "series": result,
-        }
+                result.append((s, points))
+        return start, end, result
 
     # --- alert rules (ALERT-05). Like the read endpoints, these need no API
     # key: the dashboard is the client, and it has no credentials of its own.
@@ -376,6 +439,26 @@ def _time_range(start: float | None, end: float | None) -> tuple[float, float]:
 
 def _baseline_dict(p: BaselinePoint) -> dict:
     return {"timestamp": p.timestamp, "value": p.value, "samples": p.samples, "mean": p.mean, "stddev": p.stddev}
+
+
+def _anomaly_dict(a: Anomaly) -> dict:
+    return {
+        "start": a.start,
+        "end": a.end,
+        "direction": a.direction,
+        "points": [
+            {
+                "timestamp": p.timestamp,
+                "value": p.value,
+                "mean": p.mean,
+                "spread": p.spread,
+                # JSON has no infinity: null is "any change from a baseline
+                # that was constantly 0", in the run's direction.
+                "deviation": p.deviation if math.isfinite(p.deviation) else None,
+            }
+            for p in a.points
+        ],
+    }
 
 
 def _rule_not_found(rule_id: int) -> HTTPException:

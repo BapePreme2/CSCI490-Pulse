@@ -368,3 +368,115 @@ def test_baseline_returns_503_when_database_is_unreachable(error):
     response = client_for(error=error).get("/hosts/web-1/metrics/cpu.usage/baseline")
 
     assert response.status_code == 503
+
+
+# --- GET /hosts/{host}/metrics/{name}/anomalies ---
+
+
+def anomalies_of(history, **params):
+    return baseline_client(history).get(
+        "/hosts/web-1/metrics/cpu.usage/anomalies", params={"start": 10_000, "end": 10_100, "window": 600, **params}
+    )
+
+
+def test_anomalies_fetches_one_window_before_start():
+    stores = []
+    client = baseline_client({}, stores)
+
+    client.get("/hosts/web-1/metrics/cpu.usage/anomalies", params={"start": 10_000, "end": 20_000, "window": 600})
+
+    assert stores[0].history_queries == [("web-1", "cpu.usage", 9_400, 20_000)]
+
+
+def test_anomalies_returns_each_run_with_its_points_and_baselines():
+    # A steady 10 +/- 0 before start: spread is floored at 1% of the mean, 0.1.
+    points = steady(9_600, 40) + [HistoryPoint(10_000.0, 10.5), HistoryPoint(10_010.0, 11.0), HistoryPoint(10_020.0, 10.0)]
+    history = {"cpu.usage": [HistorySeries("percent", {"core": "0"}, points)]}
+
+    response = anomalies_of(history)
+
+    assert response.status_code == 200
+    body = response.json()
+    assert (body["host"], body["name"], body["window_seconds"], body["min_samples"], body["sigma"]) == (
+        "web-1", "cpu.usage", 600, 30, 3.0
+    )
+    (series,) = body["series"]
+    assert (series["unit"], series["tags"]) == ("percent", {"core": "0"})
+    (anomaly,) = series["anomalies"]
+    assert (anomaly["start"], anomaly["end"], anomaly["direction"]) == (10_000.0, 10_010.0, "above")
+    first, second = anomaly["points"]
+    assert first == {"timestamp": 10_000.0, "value": 10.5, "mean": 10.0, "spread": pytest.approx(0.1),
+                     "deviation": pytest.approx(5.0)}
+    assert second["timestamp"] == 10_010.0
+    assert second["mean"] == pytest.approx((40 * 10 + 10.5) / 41)
+
+
+def test_anomalies_leaves_out_series_with_none():
+    history = {
+        "cpu.usage": [
+            HistorySeries("percent", {"core": "0"}, steady(9_600, 45)),
+            HistorySeries("percent", {"core": "1"}, steady(9_600, 40) + [HistoryPoint(10_000.0, 90.0)]),
+        ]
+    }
+
+    response = anomalies_of(history)
+
+    assert [s["tags"] for s in response.json()["series"]] == [{"core": "1"}]
+
+
+def test_anomalies_uses_the_given_sigma():
+    points = steady(9_600, 40) + [HistoryPoint(10_000.0, 10.35)]  # 3.5 sigma
+    history = {"cpu.usage": [HistorySeries("percent", {}, points)]}
+
+    assert len(anomalies_of(history, sigma=3).json()["series"]) == 1
+    assert anomalies_of(history, sigma=4).json()["series"] == []
+    assert anomalies_of(history, sigma=4).json()["sigma"] == 4.0
+
+
+def test_an_infinite_deviation_is_null_with_its_direction():
+    points = steady(9_600, 40, value=0.0) + [HistoryPoint(10_000.0, 3.0)]
+    history = {"cpu.usage": [HistorySeries("count", {}, points)]}
+
+    response = anomalies_of(history)
+
+    assert response.status_code == 200
+    (anomaly,) = response.json()["series"][0]["anomalies"]
+    assert anomaly["direction"] == "above"
+    assert anomaly["points"][0]["deviation"] is None
+
+
+def test_anomalies_defaults_to_the_last_hour_a_one_hour_window_and_three_sigma():
+    response = baseline_client({}).get("/hosts/web-1/metrics/cpu.usage/anomalies")
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["end"] - body["start"] == pytest.approx(3600, abs=1)
+    assert (body["window_seconds"], body["sigma"]) == (3600, 3.0)
+
+
+@pytest.mark.parametrize("params", [{"sigma": 0}, {"sigma": -2}, {"sigma": 101}, {"sigma": "inf"},
+                                    {"sigma": "nan"}, {"window": 59}, {"window": 86_401}])
+def test_anomalies_rejects_out_of_bounds_parameters(params):
+    response = baseline_client({}).get("/hosts/web-1/metrics/cpu.usage/anomalies", params=params)
+
+    assert response.status_code == 422
+
+
+@pytest.mark.parametrize("params", [{"start": 100, "end": 50}, {"start": 0, "end": 31 * 24 * 3600}])
+def test_anomalies_rejects_the_same_ranges_as_history(params):
+    response = baseline_client({}).get("/hosts/web-1/metrics/cpu.usage/anomalies", params=params)
+
+    assert response.status_code == 400
+
+
+def test_anomalies_returns_404_for_unknown_host():
+    assert client_for().get("/hosts/nope/metrics/cpu.usage/anomalies").status_code == 404
+
+
+def test_anomalies_does_not_require_an_api_key():
+    assert baseline_client({}).get("/hosts/web-1/metrics/cpu.usage/anomalies", headers={}).status_code == 200
+
+
+@pytest.mark.parametrize("error", [psycopg.OperationalError("down"), PoolTimeout("timeout")])
+def test_anomalies_returns_503_when_database_is_unreachable(error):
+    assert client_for(error=error).get("/hosts/web-1/metrics/cpu.usage/anomalies").status_code == 503

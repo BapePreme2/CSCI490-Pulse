@@ -79,6 +79,49 @@ describe("LineChart", () => {
     expect(screen.getByText("core 1")).toBeInTheDocument();
   });
 
+  it("draws a marker on its series' line for each marked point, in the series' color", () => {
+    render(
+      <LineChart
+        series={[
+          { label: "core 0", points: [{ timestamp: 0, value: 10 }, { timestamp: 10, value: 90 }] },
+          {
+            label: "core 1",
+            points: [{ timestamp: 0, value: 5 }, { timestamp: 10, value: 6 }],
+            markers: [{ timestamp: 10, value: 6, label: "core 1 at 10: +4.0σ" }],
+          },
+        ]}
+        markerLabel="anomaly"
+      />,
+    );
+
+    const [marker] = screen.getAllByTestId("marker-core 1");
+    const dot = marker.querySelector(".line-chart-marker-dot")!;
+    const [, lastPoint] = screen.getByTestId("line-core 1").getAttribute("points")!.trim().split(/\s+/);
+    expect(`${dot.getAttribute("cx")},${dot.getAttribute("cy")}`).toBe(lastPoint);
+    expect(dot.getAttribute("fill")).toBe(screen.getByTestId("line-core 1").getAttribute("stroke"));
+    expect(marker.querySelector("title")?.textContent).toBe("core 1 at 10: +4.0σ");
+    expect(screen.queryAllByTestId("marker-core 0")).toHaveLength(0);
+  });
+
+  it("names markers in the legend and the chart's title only when there are some", () => {
+    const series = [{ label: "core 0", points: [{ timestamp: 0, value: 1 }, { timestamp: 10, value: 50 }] }];
+    const without = render(<LineChart series={series} markerLabel="anomaly" />);
+    expect(without.container.querySelector(".line-chart-legend")).toBeNull();
+    without.unmount();
+
+    const { container } = render(
+      <LineChart
+        series={[{ ...series[0], markers: [{ timestamp: 10, value: 50, label: "spike" }] }]}
+        markerLabel="anomaly"
+      />,
+    );
+
+    // One series: no swatch for it, just the marker key.
+    expect(container.querySelectorAll(".line-chart-legend li")).toHaveLength(1);
+    expect(screen.getByText("anomaly")).toBeInTheDocument();
+    expect(screen.getByRole("img")).toHaveAccessibleName("core 0 over time, 1 point marked as anomaly");
+  });
+
   it("labels the y-axis with the min and max value", () => {
     render(<LineChart series={[{ label: "core 0", points: [{ timestamp: 0, value: 42 }] }]} />);
 
