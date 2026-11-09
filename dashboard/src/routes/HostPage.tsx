@@ -13,6 +13,7 @@ import { AnomalyList } from "../components/AnomalyList";
 import { CpuTile } from "../components/CpuTile";
 import { DiskTile } from "../components/DiskTile";
 import { LineChart } from "../components/LineChart";
+import { ListeningPorts } from "../components/ListeningPorts";
 import { MemoryTile } from "../components/MemoryTile";
 import { NetworkTile } from "../components/NetworkTile";
 import { TimeRangeSelector } from "../components/TimeRangeSelector";
@@ -250,6 +251,8 @@ export function HostPage() {
           </>
         )}
       </section>
+
+      {latestState.status === "loaded" && <ListeningPorts metrics={latestState.metrics} />}
     </section>
   );
 }

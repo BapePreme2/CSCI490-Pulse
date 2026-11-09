@@ -9,6 +9,7 @@ from pulse_agent.collectors.disk import DiskIOCollector, DiskUsageCollector
 from pulse_agent.collectors.load import LoadAverageCollector
 from pulse_agent.collectors.memory import MemoryCollector
 from pulse_agent.collectors.network import NetworkCollector
+from pulse_agent.collectors.ports import ListeningPortsCollector
 from pulse_agent.config import AgentConfig
 from pulse_agent.metrics import Metric
 from pulse_agent.sender import HttpSender
@@ -44,6 +45,7 @@ class PulseAgent:
             DiskUsageCollector(),
             DiskIOCollector(),
             NetworkCollector(),
+            ListeningPortsCollector(),
         ]
 
     def collect_once(self) -> list[Metric]:

@@ -96,6 +96,17 @@ describe("HostPage", () => {
     await waitFor(() => expect(screen.getByText("12.5%")).toBeInTheDocument());
   });
 
+  it("lists the host's listening ports from the latest metrics", async () => {
+    fetchLatestMetrics.mockResolvedValue([
+      { name: "network.listening_port", unit: "bool", tags: { protocol: "tcp", address: "0.0.0.0", port: "22" }, value: 1, timestamp: 5 },
+      { name: "network.listening_ports", unit: "count", tags: {}, value: 1, timestamp: 5 },
+    ]);
+
+    renderHost("web-1");
+
+    await waitFor(() => expect(screen.getByRole("heading", { name: "Listening ports (1)" })).toBeInTheDocument());
+  });
+
   it("shows a not-found message for an unknown host", async () => {
     fetchLatestMetrics.mockRejectedValue(new HostNotFoundError("nope"));
 

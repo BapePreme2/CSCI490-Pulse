@@ -1,8 +1,8 @@
 # Pulse Agent
 
 Lightweight host monitoring agent. Collects CPU, load average, memory,
-disk, and network metrics on an interval and reports them to the Pulse
-ingestion API.
+disk, and network metrics, plus the host's listening ports, on an interval
+and reports them to the Pulse ingestion API.
 
 This README is for developing the agent. To put it on a machine you want
 monitored, see [`DEPLOY.md`](DEPLOY.md) instead.
@@ -91,6 +91,16 @@ pytest
 - **`Sender`** is a small protocol (`send(metrics) -> bool`), so the
   collection and buffering code doesn't know how metrics are delivered.
   `HttpSender` is the real implementation; `LoggingSender` backs `--dry-run`.
+- **Listening ports** (`ListeningPortsCollector`) are sent as one
+  `network.listening_port` series per socket (value 1, tagged `protocol`,
+  `address`, `port`, and `process` when visible), plus a
+  `network.listening_ports` count every cycle with the same timestamp. The
+  API only stores numbers, so this needed no ingest or schema changes, and
+  a reader tells which ports are still open by matching the latest count's
+  timestamp. Seeing every socket's process takes root: as a normal user,
+  Linux lists all ports but only names your own processes, and macOS
+  (where psutil can't list all sockets unprivileged) falls back to your own
+  processes' ports.
 
 ## Task mapping (Week 3, CSCI 490 semester plan)
 
@@ -125,3 +135,9 @@ pytest
 | Task | File(s) |
 | --- | --- |
 | OPS-03 stabilize against a test fleet | `Dockerfile`, `.dockerignore`, `pulse_agent/__main__.py` + `pulse_agent/agent.py` (clean stop on `SIGTERM`/`SIGINT`), `pulse_agent/collectors/disk.py` (container root, file mounts, virtual devices), `tests/test_agent.py`, `tests/test_disk.py`; `scripts/test-fleet.sh` and `docs/ops-03-stability-run.md` at the repo root |
+
+## Task mapping (Week 10)
+
+| Task | File(s) |
+| --- | --- |
+| SEC-01 listening-port scan per host | `pulse_agent/collectors/ports.py`, `pulse_agent/agent.py`, `tests/test_ports.py`; dashboard `src/metrics/ports.ts`, `src/components/ListeningPorts.tsx` (on the host page) |
