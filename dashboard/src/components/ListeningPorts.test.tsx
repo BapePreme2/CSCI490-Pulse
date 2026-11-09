@@ -24,9 +24,30 @@ describe("ListeningPorts", () => {
     expect(screen.getByRole("heading", { name: "Listening ports (2)" })).toBeInTheDocument();
     const rows = screen.getAllByRole("row").slice(1);
     expect(rows.map((r) => within(r).getAllByRole("cell").map((c) => c.textContent))).toEqual([
-      ["22", "TCP", "::", "—"],
-      ["5432", "TCP", "0.0.0.0", "postgres"],
+      ["22", "TCP", "::", "—", ""],
+      ["5432", "TCP", "0.0.0.0", "postgres", ""],
     ]);
+    expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+  });
+
+  it("flags exposed services in the table and in a warning", () => {
+    render(
+      <ListeningPorts
+        metrics={[
+          port(22),
+          port(5432, { process: "postgres", exposed: "true" }),
+          port(5432, { address: "::", exposed: "true" }),
+          count(3),
+        ]}
+      />,
+    );
+
+    expect(screen.getByRole("alert")).toHaveTextContent(
+      "1 sensitive service is listening on an address other machines can reach: 5432/tcp (postgres).",
+    );
+    const flagged = screen.getAllByText("Exposed").map((badge) => badge.closest("tr"));
+    expect(flagged).toHaveLength(2);
+    expect(flagged.every((row) => row?.classList.contains("port-row--exposed"))).toBe(true);
   });
 
   it("says so when nothing is listening", () => {

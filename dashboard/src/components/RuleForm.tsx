@@ -28,6 +28,8 @@ export const KNOWN_METRICS = [
   "network.packets_recv",
   "network.errors",
   "network.drops",
+  "network.listening_ports",
+  "network.exposed_services",
 ];
 
 interface RuleFormProps {

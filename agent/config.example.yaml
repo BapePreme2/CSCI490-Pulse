@@ -27,3 +27,9 @@ buffer_max_batches: 100
 
 # Seconds to wait for the ingestion API before treating a send as failed.
 request_timeout_seconds: 10
+
+# Listening ports to flag as "exposed" when bound to an address other
+# machines can reach (anything but loopback). Omit for the defaults (SSH,
+# RDP, Telnet, FTP, SMTP, SMB, VNC, the Docker API, and common databases and
+# caches); set to [] to turn the check off.
+# sensitive_ports: [22, 3389, 5432, 6379]

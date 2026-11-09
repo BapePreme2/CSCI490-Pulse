@@ -94,7 +94,10 @@ sudo chown -R pulse-agent:pulse-agent /opt/pulse-agent /etc/pulse-agent
 ```
 
 (A dedicated, unprivileged system user, not root -- the agent only reads
-system metrics, it never needs write/admin access to anything.)
+system metrics, it never needs write/admin access to anything. The one
+thing root would add is the process name next to other users' listening
+ports on the host page; the ports themselves, and the exposed-service
+check, work the same either way on Linux.)
 
 ```bash
 sudo tee /etc/systemd/system/pulse-agent.service > /dev/null <<'EOF'

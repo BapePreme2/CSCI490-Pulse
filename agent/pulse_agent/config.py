@@ -6,6 +6,8 @@ from pathlib import Path
 
 import yaml
 
+from pulse_agent.collectors.ports import DEFAULT_SENSITIVE_PORTS
+
 
 class ConfigError(Exception):
     """Raised when the agent's config file is missing or invalid."""
@@ -27,6 +29,7 @@ class AgentConfig:
     tags: dict[str, str] = field(default_factory=dict)
     buffer_max_batches: int = 100
     request_timeout_seconds: float = 10.0
+    sensitive_ports: tuple[int, ...] = DEFAULT_SENSITIVE_PORTS
 
     @classmethod
     def from_dict(cls, data: dict) -> "AgentConfig":
@@ -55,7 +58,23 @@ class AgentConfig:
             tags=_validate_tags(data.get("tags") or {}),
             buffer_max_batches=int(data.get("buffer_max_batches", 100)),
             request_timeout_seconds=timeout,
+            sensitive_ports=_validate_ports(data.get("sensitive_ports", DEFAULT_SENSITIVE_PORTS)),
         )
+
+
+def _validate_ports(raw: object) -> tuple[int, ...]:
+    # null means "use the defaults"; an empty list turns exposure flagging off.
+    if raw is None:
+        return DEFAULT_SENSITIVE_PORTS
+    if not isinstance(raw, (list, tuple)):
+        raise ConfigError(f"sensitive_ports must be a list of port numbers, got: {raw!r}")
+    ports: list[int] = []
+    for port in raw:
+        # bool is an int subclass; `true` in YAML is almost certainly a typo.
+        if isinstance(port, bool) or not isinstance(port, int) or not 1 <= port <= 65535:
+            raise ConfigError(f"sensitive_ports entries must be port numbers 1-65535, got: {port!r}")
+        ports.append(port)
+    return tuple(sorted(set(ports)))
 
 
 def _validate_tags(raw: object) -> dict[str, str]:

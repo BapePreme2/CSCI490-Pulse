@@ -120,3 +120,30 @@ def test_tags_values_are_coerced_to_strings(tmp_path):
     config_file.write_text("endpoint: https://e.com\napi_key: k\ntags:\n  replicas: 3\n")
 
     assert load_config(config_file).tags == {"replicas": "3"}
+
+
+def _config_with(tmp_path, extra: str):
+    config_file = tmp_path / "config.yaml"
+    config_file.write_text("endpoint: https://example.com\napi_key: secret\n" + extra)
+    return load_config(config_file)
+
+
+def test_sensitive_ports_default_when_omitted_or_null(tmp_path):
+    from pulse_agent.collectors.ports import DEFAULT_SENSITIVE_PORTS
+
+    assert _config_with(tmp_path, "").sensitive_ports == DEFAULT_SENSITIVE_PORTS
+    assert _config_with(tmp_path, "sensitive_ports: null\n").sensitive_ports == DEFAULT_SENSITIVE_PORTS
+
+
+def test_sensitive_ports_are_deduplicated_and_sorted(tmp_path):
+    assert _config_with(tmp_path, "sensitive_ports: [5432, 22, 22]\n").sensitive_ports == (22, 5432)
+
+
+def test_empty_sensitive_ports_turns_flagging_off(tmp_path):
+    assert _config_with(tmp_path, "sensitive_ports: []\n").sensitive_ports == ()
+
+
+@pytest.mark.parametrize("value", ["22", "[0]", "[70000]", "['ssh']", "[true]"])
+def test_invalid_sensitive_ports_raise(tmp_path, value):
+    with pytest.raises(ConfigError):
+        _config_with(tmp_path, f"sensitive_ports: {value}\n")

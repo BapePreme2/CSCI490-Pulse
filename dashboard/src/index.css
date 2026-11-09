@@ -392,6 +392,20 @@ h1 {
   text-decoration: underline;
 }
 
+.port-row--exposed td {
+  background: color-mix(in srgb, var(--color-warning) 8%, transparent);
+}
+
+.port-flag {
+  display: inline-block;
+  padding: 1px var(--space-2);
+  border: 1px solid var(--color-warning);
+  border-radius: var(--radius-md);
+  color: var(--color-warning);
+  font-size: 0.78rem;
+  font-weight: 600;
+}
+
 .fleet-status {
   display: inline-flex;
   align-items: center;

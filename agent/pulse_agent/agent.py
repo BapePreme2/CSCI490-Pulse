@@ -45,7 +45,7 @@ class PulseAgent:
             DiskUsageCollector(),
             DiskIOCollector(),
             NetworkCollector(),
-            ListeningPortsCollector(),
+            ListeningPortsCollector(config.sensitive_ports),
         ]
 
     def collect_once(self) -> list[Metric]:

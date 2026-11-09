@@ -36,8 +36,12 @@ def ports(metrics):
     return [m.tags for m in metrics if m.name == "network.listening_port"]
 
 
-def count(metrics):
-    return next(m.value for m in metrics if m.name == "network.listening_ports")
+def count(metrics, name="network.listening_ports"):
+    return next(m.value for m in metrics if m.name == name)
+
+
+def exposed(metrics):
+    return [(t["address"], t["port"]) for t in ports(metrics) if t.get("exposed") == "true"]
 
 
 def test_reports_listening_tcp_and_bound_udp_sockets_sorted_by_port():
@@ -53,7 +57,7 @@ def test_reports_listening_tcp_and_bound_udp_sockets_sorted_by_port():
     assert ports(metrics) == [
         {"protocol": "tcp", "address": "127.0.0.1", "port": "22"},
         {"protocol": "udp", "address": "0.0.0.0", "port": "53"},
-        {"protocol": "tcp", "address": "0.0.0.0", "port": "5432", "process": "postgres"},
+        {"protocol": "tcp", "address": "0.0.0.0", "port": "5432", "process": "postgres", "exposed": "true"},
     ]
     assert count(metrics) == 3
     assert all(m.value == 1.0 and m.unit == "bool" for m in metrics if m.name == "network.listening_port")
@@ -105,7 +109,7 @@ def test_omits_process_tag_when_the_process_cannot_be_inspected():
     ):
         metrics = ListeningPortsCollector().collect()
 
-    assert ports(metrics) == [{"protocol": "tcp", "address": "0.0.0.0", "port": "22"}]
+    assert ports(metrics) == [{"protocol": "tcp", "address": "0.0.0.0", "port": "22", "exposed": "true"}]
 
 
 def test_port_samples_share_the_count_timestamp():
@@ -138,3 +142,57 @@ def test_reports_nothing_when_no_sockets_can_be_read_at_all():
         f"{MODULE}.process_iter", return_value=[unreadable]
     ):
         assert ListeningPortsCollector().collect() == []
+
+
+def test_flags_sensitive_ports_reachable_from_the_network():
+    metrics = collect(
+        [
+            tcp("0.0.0.0", 5432),         # every IPv4 interface
+            tcp("::", 3389),              # every IPv6 interface
+            tcp("192.168.1.20", 22),      # one LAN address is still reachable
+            tcp("fe80::1%eth0", 6379),    # so is a scoped link-local one
+            tcp("0.0.0.0", 443),          # reachable, but web ports aren't sensitive
+        ]
+    )
+
+    assert exposed(metrics) == [
+        ("192.168.1.20", "22"),
+        ("::", "3389"),
+        ("0.0.0.0", "5432"),
+        ("fe80::1%eth0", "6379"),
+    ]
+    assert count(metrics, "network.exposed_services") == 4
+
+
+def test_loopback_binds_of_sensitive_ports_are_not_exposed():
+    metrics = collect(
+        [tcp("127.0.0.1", 5432), tcp("127.0.0.53", 22), tcp("::1", 6379), tcp("::ffff:127.0.0.1", 3306)]
+    )
+
+    assert exposed(metrics) == []
+    assert count(metrics, "network.exposed_services") == 0
+
+
+def test_counts_a_service_on_both_ipv4_and_ipv6_once():
+    metrics = collect([tcp("0.0.0.0", 22), tcp("::", 22)])
+
+    assert len(exposed(metrics)) == 2
+    assert count(metrics, "network.exposed_services") == 1
+
+
+def test_unparseable_address_is_flagged_rather_than_missed():
+    assert exposed(collect([tcp("not-an-ip", 22)])) == [("not-an-ip", "22")]
+
+
+def test_sensitive_ports_are_configurable():
+    with patch(f"{MODULE}.net_connections", return_value=[tcp("0.0.0.0", 22), tcp("0.0.0.0", 8080)]):
+        metrics = ListeningPortsCollector(sensitive_ports=(8080,)).collect()
+
+    assert exposed(metrics) == [("0.0.0.0", "8080")]
+
+
+def test_exposed_count_shares_the_cycle_timestamp():
+    with patch("pulse_agent.collectors.ports.time.time", return_value=1000.0):
+        metrics = collect([tcp("0.0.0.0", 22)])
+
+    assert next(m for m in metrics if m.name == "network.exposed_services").timestamp == 1000.0

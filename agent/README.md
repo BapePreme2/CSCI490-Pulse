@@ -101,6 +101,16 @@ pytest
   Linux lists all ports but only names your own processes, and macOS
   (where psutil can't list all sockets unprivileged) falls back to your own
   processes' ports.
+- **Exposed services** (SEC-02). A listening port is tagged
+  `exposed: "true"` when it's in `sensitive_ports` (config; defaults to
+  SSH, RDP, Telnet, FTP, SMTP, SMB, VNC, the Docker API, and common
+  databases/caches, not web ports) and bound to an address other machines
+  can reach. That's any non-loopback address, not only `0.0.0.0`/`::`,
+  since binding to one LAN IP exposes a service to that LAN just the same.
+  `network.exposed_services` counts them every cycle (IPv4 and IPv6 binds
+  of one port count once), so an ordinary threshold rule,
+  `network.exposed_services > 0`, alerts on it. This only sees what the
+  host binds to: a firewall or cloud security group may still block it.
 
 ## Task mapping (Week 3, CSCI 490 semester plan)
 
@@ -141,3 +151,4 @@ pytest
 | Task | File(s) |
 | --- | --- |
 | SEC-01 listening-port scan per host | `pulse_agent/collectors/ports.py`, `pulse_agent/agent.py`, `tests/test_ports.py`; dashboard `src/metrics/ports.ts`, `src/components/ListeningPorts.tsx` (on the host page) |
+| SEC-02 flag exposed services | `pulse_agent/collectors/ports.py` (`DEFAULT_SENSITIVE_PORTS`, `network_reachable`), `pulse_agent/config.py` (`sensitive_ports`), `config.example.yaml`, `tests/test_ports.py`, `tests/test_config.py`; dashboard `src/components/ListeningPorts.tsx` (badge + warning), `src/components/RuleForm.tsx` (metric suggestions) |

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import ipaddress
 import logging
 import socket
 import time
@@ -15,6 +16,28 @@ logger = logging.getLogger(__name__)
 # 200-character tag limit even for a port shared by many workers.
 _MAX_PROCESS_TAG_LEN = 64
 
+# Services that are rarely meant to be open to a network, and are common
+# targets when they are (SEC-02): remote access, file sharing, databases and
+# caches, and unauthenticated admin APIs. Web ports (80/443) are left out on
+# purpose: serving them to the network is usually the point.
+DEFAULT_SENSITIVE_PORTS: tuple[int, ...] = (
+    21,     # FTP
+    22,     # SSH
+    23,     # Telnet
+    25,     # SMTP
+    445,    # SMB
+    1433,   # SQL Server
+    2375,   # Docker API (unencrypted)
+    3306,   # MySQL
+    3389,   # RDP
+    5432,   # PostgreSQL
+    5900,   # VNC
+    6379,   # Redis
+    9200,   # Elasticsearch
+    11211,  # Memcached
+    27017,  # MongoDB
+)
+
 
 @dataclass
 class _Listener:
@@ -23,9 +46,24 @@ class _Listener:
     port: int
     processes: set[str] = field(default_factory=set)
 
+    @property
+    def network_reachable(self) -> bool:
+        """Whether other machines could connect: bound to every interface
+        (0.0.0.0 / ::) or to any specific non-loopback address. An address
+        that can't be parsed counts as reachable, so it gets flagged rather
+        than missed."""
+        try:
+            ip = ipaddress.ip_address(self.address.split("%", 1)[0])
+        except ValueError:
+            return True
+        if isinstance(ip, ipaddress.IPv6Address) and ip.ipv4_mapped:
+            ip = ip.ipv4_mapped
+        return not ip.is_loopback
+
 
 class ListeningPortsCollector:
-    """Reports every TCP/UDP socket the host is listening on (SEC-01).
+    """Reports every TCP/UDP socket the host is listening on (SEC-01) and
+    flags the sensitive ones other machines can reach (SEC-02).
 
     Each listening socket becomes one `network.listening_port` sample
     (value 1) tagged with its protocol, bind address, port, and owning
@@ -34,12 +72,19 @@ class ListeningPortsCollector:
     timestamp with that cycle's port samples, so a reader can tell which
     ports are still open: a port that closes just stops being reported.
 
+    A port in `sensitive_ports` that is reachable from the network also
+    gets an `exposed: "true"` tag, and `network.exposed_services` counts
+    those every cycle (as distinct protocol/port pairs, so a service bound
+    on both IPv4 and IPv6 counts once). A threshold rule on that count
+    (`> 0`) alerts on exposure with no new alerting code.
+
     The metric pipeline only stores numbers, so a port list is sent as one
     series per port instead of a new payload type. That way ingest, storage,
     and alert rules need no changes.
     """
 
-    def __init__(self) -> None:
+    def __init__(self, sensitive_ports: tuple[int, ...] | frozenset[int] = DEFAULT_SENSITIVE_PORTS) -> None:
+        self._sensitive_ports = frozenset(sensitive_ports)
         self._warned_partial = False
 
     def collect(self) -> list[Metric]:
@@ -48,6 +93,7 @@ class ListeningPortsCollector:
             return []
 
         now = time.time()
+        exposed = {(l.protocol, l.port) for l in listeners.values() if self._is_exposed(l)}
         metrics = [
             Metric(
                 "network.listening_port",
@@ -59,10 +105,13 @@ class ListeningPortsCollector:
             for listener in sorted(listeners.values(), key=lambda l: (l.port, l.protocol, l.address))
         ]
         metrics.append(Metric("network.listening_ports", float(len(listeners)), "count", timestamp=now))
+        metrics.append(Metric("network.exposed_services", float(len(exposed)), "count", timestamp=now))
         return metrics
 
-    @staticmethod
-    def _tags(listener: _Listener) -> dict[str, str]:
+    def _is_exposed(self, listener: _Listener) -> bool:
+        return listener.port in self._sensitive_ports and listener.network_reachable
+
+    def _tags(self, listener: _Listener) -> dict[str, str]:
         tags = {
             "protocol": listener.protocol,
             "address": listener.address,
@@ -70,6 +119,8 @@ class ListeningPortsCollector:
         }
         if listener.processes:
             tags["process"] = ",".join(sorted(listener.processes))[:_MAX_PROCESS_TAG_LEN]
+        if self._is_exposed(listener):
+            tags["exposed"] = "true"
         return tags
 
     def _listeners(self) -> dict[tuple[str, str, int], _Listener] | None:
